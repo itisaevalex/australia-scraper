@@ -62,6 +62,8 @@ MARKIT_DIRECTORY_URL = (
 )
 
 VALID_PERIODS = ("T", "P", "W", "M", "M3", "M6")
+TICKER_RE = re.compile(r"^[A-Z0-9]{2,6}$")
+IDS_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
 DB_PATH = Path("filings_cache.db")
 DOCUMENTS_DIR = Path("documents")
 FETCH_DELAY = 0.3  # seconds between page fetches
@@ -158,12 +160,9 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 def upsert_announcement(conn: sqlite3.Connection, ann: Announcement) -> bool:
     """Insert announcement if not already present. Returns True when new."""
-    cur = conn.execute("SELECT ids_id FROM announcements WHERE ids_id = ?", (ann.ids_id,))
-    if cur.fetchone():
-        return False
     conn.execute(
         """
-        INSERT INTO announcements
+        INSERT OR IGNORE INTO announcements
             (ids_id, asx_code, date, time, headline, pdf_url, file_size,
              num_pages, price_sensitive)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -180,8 +179,9 @@ def upsert_announcement(conn: sqlite3.Connection, ann: Announcement) -> bool:
             ann.price_sensitive,
         ),
     )
+    inserted = conn.total_changes > 0
     conn.commit()
-    return True
+    return inserted
 
 
 def mark_downloaded(
@@ -565,6 +565,10 @@ def download_pdf(
     Download a PDF to documents/{asx_code}/{ids_id}.pdf.
     Returns (direct_url, local_path) on success, None on failure.
     """
+    if not TICKER_RE.match(asx_code) or not IDS_ID_RE.match(ids_id):
+        log.warning("Rejected suspicious asx_code=%r ids_id=%r", asx_code, ids_id)
+        return None
+
     dest_dir = DOCUMENTS_DIR / asx_code
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"{ids_id}.pdf"
@@ -573,16 +577,24 @@ def download_pdf(
         log.debug("Already downloaded: %s", dest_path)
         return direct_url, str(dest_path)
 
-    resp = safe_get(session, direct_url)
-    if resp is None:
+    try:
+        with session.get(direct_url, stream=True, timeout=60) as resp:
+            resp.raise_for_status()
+            first_chunk = True
+            with dest_path.open("wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 16):
+                    if first_chunk and not chunk[:4].startswith(b"%PDF"):
+                        log.warning("Response for ids_id=%s does not look like a PDF", ids_id)
+                        return None
+                    first_chunk = False
+                    fh.write(chunk)
+    except requests.RequestException as exc:
+        log.warning("PDF download failed for ids_id=%s: %s", ids_id, exc)
+        if dest_path.exists():
+            dest_path.unlink()
         return None
 
-    if resp.content[:4] != b"%PDF":
-        log.warning("Response for ids_id=%s does not look like a PDF", ids_id)
-        return None
-
-    dest_path.write_bytes(resp.content)
-    log.debug("Saved %s (%d bytes)", dest_path, len(resp.content))
+    log.debug("Saved %s (%d bytes)", dest_path, dest_path.stat().st_size)
     return direct_url, str(dest_path)
 
 
@@ -767,6 +779,14 @@ def crawl_prev_bus_day(
 def cmd_crawl(args: argparse.Namespace) -> None:
     """crawl command: fetch announcements for one or more tickers."""
     conn = get_db()
+    try:
+        _do_crawl(conn, args)
+    finally:
+        conn.close()
+
+
+def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
+    """Internal crawl logic."""
     session = make_session()
 
     if args.all_day:
@@ -809,17 +829,17 @@ def cmd_crawl(args: argparse.Namespace) -> None:
     _print_crawl_summary(results)
 
     if args.download:
-        rows = fetch_undownloaded(conn, ticker=None if not args.tickers else None)
+        rows = fetch_undownloaded(conn)
         batch_download(conn, rows, workers=args.workers)
 
 
 def cmd_monitor(args: argparse.Namespace) -> None:
     """monitor command: poll prevBusDayAnns.do on a fixed interval."""
     conn = get_db()
-    session = make_session()
-    log.info("Monitoring started. Interval: %ds. Press Ctrl+C to stop.", args.interval)
-
     try:
+        session = make_session()
+        log.info("Monitoring started. Interval: %ds. Press Ctrl+C to stop.", args.interval)
+
         while True:
             log.info("--- Monitor tick at %s ---", datetime.utcnow().isoformat())
             result = crawl_prev_bus_day(session, conn)
@@ -839,12 +859,21 @@ def cmd_monitor(args: argparse.Namespace) -> None:
             time.sleep(args.interval)
     except KeyboardInterrupt:
         log.info("Monitor stopped by user.")
+    finally:
+        conn.close()
 
 
 def cmd_export(args: argparse.Namespace) -> None:
     """export command: write cached announcements to a JSON file."""
     conn = get_db()
+    try:
+        _do_export(conn, args)
+    finally:
+        conn.close()
 
+
+def _do_export(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
+    """Internal export logic."""
     query = "SELECT * FROM announcements WHERE 1=1"
     params: list[Any] = []
 
@@ -870,7 +899,14 @@ def cmd_export(args: argparse.Namespace) -> None:
 def cmd_stats(args: argparse.Namespace) -> None:
     """stats command: print a summary of the local cache."""
     conn = get_db()
+    try:
+        _do_stats(conn)
+    finally:
+        conn.close()
 
+
+def _do_stats(conn: sqlite3.Connection) -> None:
+    """Internal stats logic."""
     total = conn.execute("SELECT COUNT(*) FROM announcements").fetchone()[0]
     downloaded = conn.execute(
         "SELECT COUNT(*) FROM announcements WHERE downloaded = TRUE"
