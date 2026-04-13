@@ -410,8 +410,8 @@ def crawl_ticker(
         crawl_type="per_company",
         ticker=ticker,
         period=period_label,
-        announcements_found=len(filings),
-        announcements_new=new_count,
+        filings_found=len(filings),
+        filings_new=new_count,
         started_at=started_at,
         completed_at=datetime.now(timezone.utc).isoformat(),
         errors=tuple(errors),
@@ -439,8 +439,8 @@ def crawl_prev_bus_day(
             crawl_type="prev_bus_day",
             ticker=None,
             period=None,
-            announcements_found=0,
-            announcements_new=0,
+            filings_found=0,
+            filings_new=0,
             started_at=started_at,
             completed_at=datetime.now(timezone.utc).isoformat(),
             errors=("HTTP request failed for prevBusDayAnns.do",),
@@ -467,8 +467,8 @@ def crawl_prev_bus_day(
         crawl_type="prev_bus_day",
         ticker=None,
         period=None,
-        announcements_found=len(filings),
-        announcements_new=new_count,
+        filings_found=len(filings),
+        filings_new=new_count,
         started_at=started_at,
         completed_at=datetime.now(timezone.utc).isoformat(),
         errors=tuple(errors),
@@ -556,7 +556,7 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
             rows = fetch_undownloaded(conn)
             batch_download(conn, rows, workers=args.workers)
         all_errors.extend(result.errors)
-        return 1 if all_errors and result.announcements_new == 0 else 0
+        return 1 if all_errors and result.filings_new == 0 else 0
 
     # --- Resolve ticker list ---
     if args.tickers:
@@ -644,8 +644,8 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
                     crawl_type="per_company",
                     ticker=ticker,
                     period=p_label,
-                    announcements_found=len(filings),
-                    announcements_new=new_count,
+                    filings_found=len(filings),
+                    filings_new=new_count,
                     started_at=started_at,
                     completed_at=datetime.now(timezone.utc).isoformat(),
                     errors=tuple(errors),
@@ -676,7 +676,7 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
         rows = fetch_undownloaded(conn)
         batch_download(conn, rows, workers=args.workers)
 
-    total_found = sum(r.announcements_found for r in all_results)
+    total_found = sum(r.filings_found for r in all_results)
     if all_errors and total_found == 0:
         return 1
     return 0
@@ -704,15 +704,15 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             result = crawl_prev_bus_day(session, conn)
             log_crawl(conn, result)
 
-            if args.download and result.announcements_new > 0:
-                log.info("Downloading %d new PDFs...", result.announcements_new)
+            if args.download and result.filings_new > 0:
+                log.info("Downloading %d new PDFs...", result.filings_new)
                 rows = fetch_undownloaded(conn)
                 batch_download(conn, rows)
 
             log.info(
                 "Tick done. found=%d new=%d. Sleeping %ds...",
-                result.announcements_found,
-                result.announcements_new,
+                result.filings_found,
+                result.filings_new,
                 args.interval,
             )
             time.sleep(args.interval)
@@ -842,8 +842,8 @@ def _compute_health(conn: sqlite3.Connection) -> str:
         pass
 
     # Error-rate check
-    found = row.get("announcements_found") or 0
-    new = row.get("announcements_new") or 0
+    found = row.get("filings_found") or 0
+    new = row.get("filings_new") or 0
     if found > 0:
         error_rate = 1.0 - (new / found) if new < found else 0.0
         # Use a proxy: if zero new AND many found, treat as degraded signal.
@@ -857,9 +857,9 @@ def _compute_health(conn: sqlite3.Connection) -> str:
 def _compute_health_from_logs(conn: sqlite3.Connection) -> str:
     """Determine scraper health considering error counts stored in crawl_log.
 
-    Uses announcements_found to proxy the total work, and checks whether the
+    Uses filings_found to proxy the total work, and checks whether the
     most recent crawl has a suspiciously high parse-error rate based on
-    crawl_log.announcements_found vs announcements_new.
+    crawl_log.filings_found vs filings_new.
 
     Args:
         conn: Active SQLite connection.
@@ -889,8 +889,8 @@ def _compute_health_from_logs(conn: sqlite3.Connection) -> str:
     except (ValueError, TypeError):
         pass
 
-    found = row.get("announcements_found") or 0
-    new_count = row.get("announcements_new") or 0
+    found = row.get("filings_found") or 0
+    new_count = row.get("filings_new") or 0
     if found > 0 and new_count == 0:
         # Every record was a duplicate — could indicate a broken run
         # Don't flag as degraded; treat as ok (normal in --resume scenarios)
@@ -1022,8 +1022,8 @@ def _do_stats(conn: sqlite3.Connection) -> None:
 
 def _print_crawl_summary(results: list[CrawlResult]) -> None:
     """Print a concise table of crawl results."""
-    total_found = sum(r.announcements_found for r in results)
-    total_new = sum(r.announcements_new for r in results)
+    total_found = sum(r.filings_found for r in results)
+    total_new = sum(r.filings_new for r in results)
     total_errors = sum(len(r.errors) for r in results)
     print(
         f"\nCrawl summary: {len(results)} ticker(s)  "

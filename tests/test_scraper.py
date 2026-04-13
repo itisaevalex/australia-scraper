@@ -61,8 +61,8 @@ def _make_filing(
 
 def _make_crawl_result(
     completed_at: str | None = None,
-    announcements_found: int = 10,
-    announcements_new: int = 5,
+    filings_found: int = 10,
+    filings_new: int = 5,
     crawl_type: str = "per_company",
     ticker: str = "BHP",
     period: str = "M6",
@@ -74,8 +74,8 @@ def _make_crawl_result(
         crawl_type=crawl_type,
         ticker=ticker,
         period=period,
-        announcements_found=announcements_found,
-        announcements_new=announcements_new,
+        filings_found=filings_found,
+        filings_new=filings_new,
         started_at=started,
         completed_at=completed_at,
     )
@@ -155,7 +155,7 @@ class TestComputeHealth:
         # Insert a crawl_log row with NULL completed_at directly
         conn.execute(
             "INSERT INTO crawl_log (crawl_type, ticker, period, "
-            "announcements_found, announcements_new, started_at, completed_at) "
+            "filings_found, filings_new, started_at, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("per_company", "BHP", "M6", 5, 2,
              datetime.now(timezone.utc).isoformat(), None),

@@ -90,8 +90,9 @@ class TestGetDb:
         ).fetchall()}
         expected = {
             "filing_id", "source", "country", "ticker",
-            "filing_date", "filing_time", "headline",
-            "filing_type", "document_url", "direct_pdf_url", "file_size",
+            "company_name", "filing_date", "filing_time", "headline",
+            "filing_type", "category", "subcategory",
+            "document_url", "direct_download_url", "file_size",
             "num_pages", "price_sensitive", "downloaded", "download_path",
             "raw_metadata", "created_at",
         }
@@ -103,8 +104,9 @@ class TestGetDb:
         ).fetchall()}
         expected = {
             "id", "crawl_type", "ticker", "period",
-            "announcements_found", "announcements_new",
-            "started_at", "completed_at",
+            "source", "query_params", "pages_crawled",
+            "filings_found", "filings_new", "errors",
+            "started_at", "completed_at", "duration_seconds",
         }
         assert expected.issubset(cols)
 
@@ -186,8 +188,8 @@ class TestGetDb:
                 crawl_type TEXT NOT NULL,
                 ticker TEXT,
                 period TEXT,
-                announcements_found INTEGER,
-                announcements_new INTEGER,
+                filings_found INTEGER,
+                filings_new INTEGER,
                 started_at TEXT NOT NULL,
                 completed_at TEXT
             )
@@ -211,7 +213,7 @@ class TestGetDb:
                 headline TEXT NOT NULL,
                 announcement_type TEXT,
                 pdf_url TEXT,
-                direct_pdf_url TEXT,
+                direct_download_url TEXT,
                 file_size TEXT,
                 num_pages INTEGER,
                 price_sensitive BOOLEAN DEFAULT FALSE,
@@ -346,15 +348,15 @@ class TestMarkDownloaded:
         ).fetchone())
         assert bool(row["downloaded"]) is True
 
-    def test_mark_downloaded_sets_direct_pdf_url(self, mem_db, sample_filing):
+    def test_mark_downloaded_sets_direct_download_url(self, mem_db, sample_filing):
         upsert_filing(mem_db, sample_filing)
         direct_url = "https://announcements.asx.com.au/asxpdf/20260413/pdf/abc123.pdf"
         mark_downloaded(mem_db, sample_filing.filing_id, direct_url, "/tmp/path.pdf")
         row = dict(mem_db.execute(
-            "SELECT direct_pdf_url FROM filings WHERE filing_id = ?",
+            "SELECT direct_download_url FROM filings WHERE filing_id = ?",
             (sample_filing.filing_id,),
         ).fetchone())
-        assert row["direct_pdf_url"] == direct_url
+        assert row["direct_download_url"] == direct_url
 
     def test_mark_downloaded_sets_download_path(self, mem_db, sample_filing):
         upsert_filing(mem_db, sample_filing)
@@ -456,8 +458,8 @@ class TestLogCrawl:
             crawl_type="per_company",
             ticker="BHP",
             period="M6",
-            announcements_found=10,
-            announcements_new=3,
+            filings_found=10,
+            filings_new=3,
             started_at="2025-01-01T00:00:00+00:00",
             completed_at="2025-01-01T00:01:00+00:00",
             errors=[],
@@ -486,10 +488,10 @@ class TestLogCrawl:
         assert row["period"] == "Y"
 
     def test_log_crawl_stores_counts(self, mem_db):
-        log_crawl(mem_db, self._result(announcements_found=100, announcements_new=25))
+        log_crawl(mem_db, self._result(filings_found=100, filings_new=25))
         row = dict(mem_db.execute("SELECT * FROM crawl_log").fetchone())
-        assert row["announcements_found"] == 100
-        assert row["announcements_new"] == 25
+        assert row["filings_found"] == 100
+        assert row["filings_new"] == 25
 
     def test_log_crawl_stores_timestamps(self, mem_db):
         result = self._result(
@@ -532,8 +534,8 @@ class TestGetLastCrawlTime:
             crawl_type="per_company",
             ticker=ticker,
             period=period,
-            announcements_found=5,
-            announcements_new=1,
+            filings_found=5,
+            filings_new=1,
             started_at="2025-01-01T00:00:00+00:00",
             completed_at=completed_at or "2025-01-01T00:01:00+00:00",
         )
@@ -575,8 +577,8 @@ class TestGetCrawledTickersForPeriod:
             crawl_type="per_company",
             ticker=ticker,
             period=period,
-            announcements_found=5,
-            announcements_new=1,
+            filings_found=5,
+            filings_new=1,
             started_at="2025-01-01T00:00:00+00:00",
             completed_at="2025-01-01T00:01:00+00:00",
         )

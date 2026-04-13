@@ -23,34 +23,42 @@ DB_PATH = Path("filings_cache.db")
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS filings (
-    filing_id        TEXT PRIMARY KEY,
-    source           TEXT NOT NULL DEFAULT 'asx',
-    country          TEXT NOT NULL DEFAULT 'AU',
-    ticker           TEXT NOT NULL,
-    filing_date      TEXT NOT NULL,
-    filing_time      TEXT,
-    headline         TEXT NOT NULL,
-    filing_type      TEXT,
-    document_url     TEXT,
-    direct_pdf_url   TEXT,
-    file_size        TEXT,
-    num_pages        INTEGER,
-    price_sensitive  BOOLEAN DEFAULT FALSE,
-    downloaded       BOOLEAN DEFAULT FALSE,
-    download_path    TEXT,
-    raw_metadata     TEXT,
-    created_at       TEXT DEFAULT CURRENT_TIMESTAMP
+    filing_id             TEXT PRIMARY KEY,
+    source                TEXT NOT NULL DEFAULT 'asx',
+    country               TEXT NOT NULL DEFAULT 'AU',
+    ticker                TEXT NOT NULL,
+    company_name          TEXT,
+    filing_date           TEXT NOT NULL,
+    filing_time           TEXT,
+    headline              TEXT NOT NULL,
+    filing_type           TEXT,
+    category              TEXT,
+    subcategory           TEXT,
+    document_url          TEXT,
+    direct_download_url   TEXT,
+    file_size             TEXT,
+    num_pages             INTEGER,
+    price_sensitive       BOOLEAN DEFAULT FALSE,
+    downloaded            BOOLEAN DEFAULT FALSE,
+    download_path         TEXT,
+    raw_metadata          TEXT,
+    created_at            TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS crawl_log (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    crawl_type           TEXT NOT NULL,
-    ticker               TEXT,
-    period               TEXT,
-    announcements_found  INTEGER,
-    announcements_new    INTEGER,
-    started_at           TEXT NOT NULL,
-    completed_at         TEXT
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    crawl_type       TEXT NOT NULL,
+    ticker           TEXT,
+    period           TEXT,
+    source           TEXT,
+    query_params     TEXT,
+    pages_crawled    INTEGER,
+    filings_found    INTEGER,
+    filings_new      INTEGER,
+    errors           INTEGER,
+    started_at       TEXT NOT NULL,
+    completed_at     TEXT,
+    duration_seconds REAL
 );
 """
 
@@ -66,13 +74,23 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("__rename_col_time",              "ALTER TABLE filings RENAME COLUMN time TO filing_time"),
     ("__rename_col_announcement_type", "ALTER TABLE filings RENAME COLUMN announcement_type TO filing_type"),
     ("__rename_col_pdf_url",           "ALTER TABLE filings RENAME COLUMN pdf_url TO document_url"),
-    # New columns
-    ("source",       "ALTER TABLE filings ADD COLUMN source TEXT NOT NULL DEFAULT 'asx'"),
-    ("country",      "ALTER TABLE filings ADD COLUMN country TEXT NOT NULL DEFAULT 'AU'"),
-    ("raw_metadata", "ALTER TABLE filings ADD COLUMN raw_metadata TEXT"),
+    # Rename direct_pdf_url -> direct_download_url (spec alignment)
+    ("__rename_col_direct_pdf_url",    "ALTER TABLE filings RENAME COLUMN direct_pdf_url TO direct_download_url"),
+    # New columns on filings
+    ("source",        "ALTER TABLE filings ADD COLUMN source TEXT NOT NULL DEFAULT 'asx'"),
+    ("country",       "ALTER TABLE filings ADD COLUMN country TEXT NOT NULL DEFAULT 'AU'"),
+    ("raw_metadata",  "ALTER TABLE filings ADD COLUMN raw_metadata TEXT"),
+    ("company_name",  "ALTER TABLE filings ADD COLUMN company_name TEXT"),
+    ("category",      "ALTER TABLE filings ADD COLUMN category TEXT"),
+    ("subcategory",   "ALTER TABLE filings ADD COLUMN subcategory TEXT"),
     # Legacy column that may exist on very old installs (from original MIGRATIONS list)
     ("announcement_type",
      "ALTER TABLE announcements ADD COLUMN announcement_type TEXT"),
+    # crawl_log: rename announcements_found/new -> filings_found/new, add missing columns.
+    # SQLite does not support RENAME COLUMN on crawl_log reliably when it already has
+    # data with the old names, so we use a table-recreation migration handled specially
+    # in _apply_migrations.
+    ("__recreate_crawl_log", "__recreate_crawl_log"),
 ]
 
 
@@ -111,11 +129,15 @@ class CrawlResult:
     crawl_type: str
     ticker: str | None
     period: str | None
-    announcements_found: int
-    announcements_new: int
+    filings_found: int
+    filings_new: int
     started_at: str
     completed_at: str
     errors: tuple[str, ...] = field(default_factory=tuple)
+    source: str | None = None
+    query_params: str | None = None
+    pages_crawled: int | None = None
+    duration_seconds: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +194,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
     Column-rename migrations use RENAME COLUMN (SQLite 3.25+).
     ADD COLUMN migrations use the standard idempotent pattern.
+    Special-case migrations (prefixed with ``__``) are handled individually.
     """
     # Build current column set for the filings table
     existing_cols = {
@@ -182,6 +205,11 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     for migration_id, sql in MIGRATIONS:
         # Skip special-case table-rename (handled in _ensure_filings_table)
         if migration_id == "__rename_table_filings":
+            continue
+
+        # Recreate crawl_log to rename announcements_* columns and add new ones
+        if migration_id == "__recreate_crawl_log":
+            _migrate_crawl_log(conn)
             continue
 
         # Skip legacy announcements-table migration if filings already has the column
@@ -216,6 +244,67 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
                 existing_cols.add(col_name)
             except sqlite3.OperationalError as exc:
                 log.warning("Migration skipped (%s): %s", migration_id, exc)
+
+
+def _migrate_crawl_log(conn: sqlite3.Connection) -> None:
+    """Recreate crawl_log with the spec-aligned column names.
+
+    Old schema: announcements_found / announcements_new, no extra columns.
+    New schema: filings_found / filings_new plus source, query_params,
+                pages_crawled, errors, duration_seconds.
+
+    Copies existing data using column name mapping.  Idempotent: does nothing
+    when crawl_log already has the ``filings_found`` column.
+
+    Args:
+        conn: Active SQLite connection.
+    """
+    existing_crawl_cols = {
+        row[1].lower()
+        for row in conn.execute("PRAGMA table_info(crawl_log)").fetchall()
+    }
+
+    # Already migrated — nothing to do
+    if "filings_found" in existing_crawl_cols:
+        return
+
+    log.info("DB migration: recreating crawl_log with spec-aligned column names")
+
+    # Determine which legacy columns actually exist so we can build a safe
+    # INSERT … SELECT that skips absent columns.
+    has_found = "announcements_found" in existing_crawl_cols
+    has_new = "announcements_new" in existing_crawl_cols
+
+    found_expr = "announcements_found" if has_found else "NULL"
+    new_expr = "announcements_new" if has_new else "NULL"
+
+    conn.executescript(f"""
+        BEGIN;
+        CREATE TABLE crawl_log_new (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            crawl_type       TEXT NOT NULL,
+            ticker           TEXT,
+            period           TEXT,
+            source           TEXT,
+            query_params     TEXT,
+            pages_crawled    INTEGER,
+            filings_found    INTEGER,
+            filings_new      INTEGER,
+            errors           INTEGER,
+            started_at       TEXT NOT NULL,
+            completed_at     TEXT,
+            duration_seconds REAL
+        );
+        INSERT INTO crawl_log_new
+            (id, crawl_type, ticker, period, started_at, completed_at,
+             filings_found, filings_new)
+        SELECT id, crawl_type, ticker, period, started_at, completed_at,
+               {found_expr}, {new_expr}
+        FROM crawl_log;
+        DROP TABLE crawl_log;
+        ALTER TABLE crawl_log_new RENAME TO crawl_log;
+        COMMIT;
+    """)
 
 
 def _extract_old_col_name(sql: str) -> str | None:
@@ -295,7 +384,7 @@ def mark_downloaded(
     conn.execute(
         """
         UPDATE filings
-        SET downloaded = TRUE, direct_pdf_url = ?, download_path = ?
+        SET downloaded = TRUE, direct_download_url = ?, download_path = ?
         WHERE filing_id = ?
         """,
         (direct_url, path, filing_id),
@@ -313,18 +402,24 @@ def log_crawl(conn: sqlite3.Connection, result: CrawlResult) -> None:
     conn.execute(
         """
         INSERT INTO crawl_log
-            (crawl_type, ticker, period, announcements_found,
-             announcements_new, started_at, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (crawl_type, ticker, period, source, query_params,
+             pages_crawled, filings_found, filings_new, errors,
+             started_at, completed_at, duration_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             result.crawl_type,
             result.ticker,
             result.period,
-            result.announcements_found,
-            result.announcements_new,
+            result.source,
+            result.query_params,
+            result.pages_crawled,
+            result.filings_found,
+            result.filings_new,
+            len(result.errors),
             result.started_at,
             result.completed_at,
+            result.duration_seconds,
         ),
     )
     conn.commit()
