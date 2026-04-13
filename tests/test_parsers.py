@@ -8,7 +8,8 @@ Tests cover:
   - _is_price_sensitive()
   - _extract_ids_id()
   - _clean()
-  - classify_announcement_type()
+  - classify_filing_type()
+  - _normalize_date()
 """
 from __future__ import annotations
 
@@ -23,8 +24,10 @@ from parsers import (
     _clean,
     _extract_ids_id,
     _is_price_sensitive,
+    _normalize_date,
     _parse_headline_td,
-    classify_announcement_type,
+    classify_filing_type,
+    classify_announcement_type,  # backwards-compat alias
     parse_announcements_do,
     parse_prev_bus_day_anns,
 )
@@ -59,6 +62,40 @@ class TestClean:
 
     def test_clean_unicode_text(self):
         assert _clean("  Réunion Holdings  ") == "Réunion Holdings"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_date() — DD/MM/YYYY -> YYYY-MM-DD
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeDate:
+    def test_converts_dd_mm_yyyy_to_iso(self):
+        assert _normalize_date("01/01/2025") == "2025-01-01"
+
+    def test_converts_various_dates_correctly(self):
+        assert _normalize_date("31/12/2024") == "2024-12-31"
+        assert _normalize_date("15/06/2023") == "2023-06-15"
+
+    def test_strips_whitespace_before_parsing(self):
+        assert _normalize_date("  13/04/2026  ") == "2026-04-13"
+
+    def test_returns_raw_when_already_iso(self):
+        # Already ISO — not a DD/MM/YYYY format, returns raw unchanged
+        result = _normalize_date("2025-01-01")
+        assert result == "2025-01-01"
+
+    def test_returns_raw_on_unparseable_input(self):
+        result = _normalize_date("not-a-date")
+        assert result == "not-a-date"
+
+    def test_returns_raw_on_empty_string(self):
+        result = _normalize_date("")
+        assert result == ""
+
+    def test_month_is_zero_padded(self):
+        # 05/03/2025 → 2025-03-05 (March, not May)
+        assert _normalize_date("05/03/2025") == "2025-03-05"
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +166,6 @@ class TestIsPriceSensitive:
         assert _is_price_sensitive(None) is False
 
     def test_case_insensitive_alt_matching(self):
-        # alt="ASTERIX" should still match (re.I flag in scraper)
         td = self._td('<img alt="ASTERIX" src="icon.svg">')
         assert _is_price_sensitive(td) is True
 
@@ -162,14 +198,14 @@ class TestParseHeadlineTd:
         result = _parse_headline_td(td)
         assert result["ids_id"] == "00000001"
 
-    def test_extracts_pdf_url_with_asx_base_prefix(self):
+    def test_extracts_document_url_with_asx_base_prefix(self):
         td = self._td(
             '<a href="/asx/v2/statistics/displayAnnouncement.do?display=pdf&idsId=00000001">'
             "Report"
             "</a>"
         )
         result = _parse_headline_td(td)
-        assert result["pdf_url"].startswith("https://www.asx.com.au")
+        assert result["document_url"].startswith("https://www.asx.com.au")
 
     def test_extracts_num_pages(self):
         td = self._td(
@@ -195,7 +231,7 @@ class TestParseHeadlineTd:
         td = self._td("<span>Some text without anchor</span>")
         result = _parse_headline_td(td)
         assert result["headline"] is None
-        assert result["pdf_url"] is None
+        assert result["document_url"] is None
         assert result["ids_id"] is None
         assert result["file_size"] is None
         assert result["num_pages"] is None
@@ -229,7 +265,7 @@ class TestParseHeadlineTd:
         result = _parse_headline_td(td)
         assert result["headline"] == "Full Year Results"
         assert result["ids_id"] == "12345678"
-        assert result["pdf_url"] == "https://www.asx.com.au/asx/v2/statistics/displayAnnouncement.do?display=pdf&idsId=12345678"
+        assert result["document_url"] == "https://www.asx.com.au/asx/v2/statistics/displayAnnouncement.do?display=pdf&idsId=12345678"
         assert result["num_pages"] == 25
         assert result["file_size"] == "500.0KB"
 
@@ -240,51 +276,63 @@ class TestParseHeadlineTd:
 
 
 class TestParseAnnouncementsDo:
-    def test_returns_announcements_from_real_bhp_html(self, bhp_html):
-        # Arrange
-        # Act
-        anns, errors = parse_announcements_do(bhp_html)
-        # Assert
-        assert len(anns) > 0
+    def test_returns_filings_from_real_bhp_html(self, bhp_html):
+        filings, errors = parse_announcements_do(bhp_html)
+        assert len(filings) > 0
 
-    def test_extracts_asx_code_bhp(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        assert all(a.asx_code == "BHP" for a in anns)
+    def test_extracts_ticker_bhp(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        assert all(f.ticker == "BHP" for f in filings)
 
-    def test_all_announcements_have_valid_ids_id(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        ids_id_pattern = re.compile(r"^[A-Za-z0-9]{1,64}$")
-        for ann in anns:
-            assert ann.ids_id, f"Missing ids_id: {ann}"
-            assert ids_id_pattern.match(ann.ids_id), f"Invalid ids_id format: {ann.ids_id!r}"
+    def test_all_filings_have_valid_filing_id(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        filing_id_pattern = re.compile(r"^[A-Za-z0-9]{1,64}$")
+        for f in filings:
+            assert f.filing_id, f"Missing filing_id: {f}"
+            assert filing_id_pattern.match(f.filing_id), f"Invalid filing_id format: {f.filing_id!r}"
 
-    def test_dates_are_in_expected_format(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        date_pattern = re.compile(r"^\d{2}/\d{2}/\d{4}$")
-        for ann in anns:
-            assert date_pattern.match(ann.date), f"Unexpected date format: {ann.date!r}"
+    def test_dates_are_in_iso_format(self, bhp_html):
+        """Dates must be YYYY-MM-DD after _normalize_date is applied."""
+        filings, _ = parse_announcements_do(bhp_html)
+        iso_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        for f in filings:
+            assert iso_pattern.match(f.filing_date), (
+                f"Expected YYYY-MM-DD, got: {f.filing_date!r}"
+            )
 
     def test_headlines_are_non_empty_strings(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        for ann in anns:
-            assert isinstance(ann.headline, str)
-            assert len(ann.headline) > 0
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            assert isinstance(f.headline, str)
+            assert len(f.headline) > 0
 
-    def test_pdf_url_contains_display_announcement(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        for ann in anns:
-            if ann.pdf_url:
-                assert "displayAnnouncement.do" in ann.pdf_url
+    def test_document_url_contains_display_announcement(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            if f.document_url:
+                assert "displayAnnouncement.do" in f.document_url
 
-    def test_pdf_url_is_absolute(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        for ann in anns:
-            if ann.pdf_url:
-                assert ann.pdf_url.startswith("https://"), f"Relative PDF URL: {ann.pdf_url!r}"
+    def test_document_url_is_absolute(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            if f.document_url:
+                assert f.document_url.startswith("https://"), (
+                    f"Relative document_url: {f.document_url!r}"
+                )
+
+    def test_source_is_asx(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            assert f.source == "asx"
+
+    def test_country_is_au(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            assert f.country == "AU"
 
     def test_empty_results_html_returns_empty_list_and_error(self, empty_html):
-        anns, errors = parse_announcements_do(empty_html)
-        assert anns == []
+        filings, errors = parse_announcements_do(empty_html)
+        assert filings == []
         assert len(errors) > 0
 
     def test_empty_results_error_mentions_announcement_data_tag(self, empty_html):
@@ -292,48 +340,61 @@ class TestParseAnnouncementsDo:
         assert any("announcement_data" in e for e in errors)
 
     def test_minimal_html_extracts_two_rows(self, minimal_announcements_html):
-        anns, errors = parse_announcements_do(minimal_announcements_html)
-        assert len(anns) == 2
+        filings, errors = parse_announcements_do(minimal_announcements_html)
+        assert len(filings) == 2
         assert errors == []
 
-    def test_minimal_html_extracts_asx_code(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        assert all(a.asx_code == "ACM" for a in anns)
+    def test_minimal_html_extracts_ticker(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        assert all(f.ticker == "ACM" for f in filings)
+
+    def test_minimal_html_dates_are_iso(self, minimal_announcements_html):
+        """After normalization, dates from the synthetic fixture must be ISO."""
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        iso_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        for f in filings:
+            assert iso_pattern.match(f.filing_date), (
+                f"Expected YYYY-MM-DD, got: {f.filing_date!r}"
+            )
+
+    def test_minimal_html_first_row_date_correct(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        # 01/01/2025 -> 2025-01-01
+        assert filings[0].filing_date == "2025-01-01"
 
     def test_minimal_html_first_row_is_price_sensitive(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        assert anns[0].price_sensitive is True
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        assert filings[0].price_sensitive is True
 
     def test_minimal_html_second_row_not_price_sensitive(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        assert anns[1].price_sensitive is False
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        assert filings[1].price_sensitive is False
 
     def test_minimal_html_extracts_time(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        assert anns[0].time == "10:00 am"
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        assert filings[0].filing_time == "10:00 am"
 
     def test_minimal_html_extracts_num_pages(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        assert anns[0].num_pages == 10
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        assert filings[0].num_pages == 10
 
     def test_minimal_html_extracts_file_size(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        assert anns[0].file_size == "120.0KB"
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        assert filings[0].file_size == "120.0KB"
 
     def test_no_announcement_data_tag_returns_error(self):
         html = "<html><body><p>Nothing here</p></body></html>"
-        anns, errors = parse_announcements_do(html)
-        assert anns == []
+        filings, errors = parse_announcements_do(html)
+        assert filings == []
         assert any("announcement_data" in e for e in errors)
 
     def test_missing_table_inside_announcement_data_returns_error(self):
         html = "<html><body><announcement_data><p>No table</p></announcement_data></body></html>"
-        anns, errors = parse_announcements_do(html)
-        assert anns == []
+        filings, errors = parse_announcements_do(html)
+        assert filings == []
         assert any("table" in e for e in errors)
 
-    def test_row_without_ids_id_is_skipped(self):
-        # Anchor with no idsId param → row should be skipped silently
+    def test_row_without_filing_id_is_skipped(self):
         html = textwrap.dedent("""\
             <html><body>
             <h2>Announcements for SKIP (SKP)</h2>
@@ -350,14 +411,14 @@ class TestParseAnnouncementsDo:
             </announcement_data>
             </body></html>
         """)
-        anns, _ = parse_announcements_do(html)
-        assert anns == []
+        filings, _ = parse_announcements_do(html)
+        assert filings == []
 
-    def test_announcements_are_frozen_dataclasses(self, bhp_html):
-        anns, _ = parse_announcements_do(bhp_html)
-        for ann in anns:
+    def test_filings_are_frozen_dataclasses(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
             with pytest.raises((AttributeError, TypeError)):
-                ann.headline = "mutated"  # type: ignore[misc]
+                f.headline = "mutated"  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -366,64 +427,85 @@ class TestParseAnnouncementsDo:
 
 
 class TestParsePrevBusDayAnns:
-    def test_returns_multiple_announcements_from_real_html(self, prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(prevbusday_html)
-        assert len(anns) > 5
+    def test_returns_multiple_filings_from_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        assert len(filings) > 5
 
-    def test_extracts_multiple_unique_asx_codes(self, prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(prevbusday_html)
-        unique_codes = set(a.asx_code for a in anns)
+    def test_extracts_multiple_unique_tickers(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        unique_codes = set(f.ticker for f in filings)
         assert len(unique_codes) > 3
 
-    def test_asx_codes_match_ticker_pattern(self, prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(prevbusday_html)
+    def test_tickers_match_ticker_pattern(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
         ticker_re = re.compile(r"^[A-Z0-9]{2,6}$")
-        for ann in anns:
-            assert ticker_re.match(ann.asx_code), f"Invalid ticker: {ann.asx_code!r}"
+        for f in filings:
+            assert ticker_re.match(f.ticker), f"Invalid ticker: {f.ticker!r}"
 
     def test_no_errors_on_real_html(self, prevbusday_html):
         _, errors = parse_prev_bus_day_anns(prevbusday_html)
         assert errors == []
 
-    def test_all_announcements_have_ids_id(self, prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(prevbusday_html)
-        for ann in anns:
-            assert ann.ids_id, f"Missing ids_id in {ann}"
+    def test_all_filings_have_filing_id(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        for f in filings:
+            assert f.filing_id, f"Missing filing_id in {f}"
+
+    def test_dates_are_iso_format_in_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        iso_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        for f in filings:
+            assert iso_pattern.match(f.filing_date), (
+                f"Expected YYYY-MM-DD, got: {f.filing_date!r}"
+            )
 
     def test_minimal_html_extracts_two_rows(self, minimal_prevbusday_html):
-        anns, errors = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        assert len(anns) == 2
+        filings, errors = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        assert len(filings) == 2
         assert errors == []
 
-    def test_minimal_html_extracts_correct_asx_codes(self, minimal_prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        codes = [a.asx_code for a in anns]
+    def test_minimal_html_extracts_correct_tickers(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        codes = [f.ticker for f in filings]
         assert "BHP" in codes
         assert "CBA" in codes
 
+    def test_minimal_html_dates_are_iso(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        iso_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        for f in filings:
+            assert iso_pattern.match(f.filing_date), (
+                f"Expected YYYY-MM-DD, got: {f.filing_date!r}"
+            )
+
+    def test_minimal_html_bhp_date_correct(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        bhp = next(f for f in filings if f.ticker == "BHP")
+        assert bhp.filing_date == "2025-01-01"
+
     def test_minimal_html_first_row_is_price_sensitive(self, minimal_prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        bhp_ann = next(a for a in anns if a.asx_code == "BHP")
-        assert bhp_ann.price_sensitive is True
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        bhp_filing = next(f for f in filings if f.ticker == "BHP")
+        assert bhp_filing.price_sensitive is True
 
     def test_minimal_html_second_row_not_price_sensitive(self, minimal_prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        cba_ann = next(a for a in anns if a.asx_code == "CBA")
-        assert cba_ann.price_sensitive is False
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        cba_filing = next(f for f in filings if f.ticker == "CBA")
+        assert cba_filing.price_sensitive is False
 
     def test_missing_announcement_data_tag_returns_error(self):
         html = "<html><body><p>No data here</p></body></html>"
-        anns, errors = parse_prev_bus_day_anns(html)
-        assert anns == []
+        filings, errors = parse_prev_bus_day_anns(html)
+        assert filings == []
         assert any("announcement_data" in e for e in errors)
 
     def test_missing_table_inside_announcement_data_returns_error(self):
         html = "<html><body><announcement_data><p>Text only</p></announcement_data></body></html>"
-        anns, errors = parse_prev_bus_day_anns(html)
-        assert anns == []
+        filings, errors = parse_prev_bus_day_anns(html)
+        assert filings == []
         assert any("table" in e for e in errors)
 
-    def test_row_without_ids_id_is_skipped(self):
+    def test_row_without_filing_id_is_skipped(self):
         html = textwrap.dedent("""\
             <html><body>
             <announcement_data>
@@ -438,23 +520,23 @@ class TestParsePrevBusDayAnns:
             </announcement_data>
             </body></html>
         """)
-        anns, _ = parse_prev_bus_day_anns(html)
-        assert anns == []
+        filings, _ = parse_prev_bus_day_anns(html)
+        assert filings == []
 
     def test_extracts_time_value(self, minimal_prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        bhp_ann = next(a for a in anns if a.asx_code == "BHP")
-        assert bhp_ann.time == "9:00 am"
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        bhp_filing = next(f for f in filings if f.ticker == "BHP")
+        assert bhp_filing.filing_time == "9:00 am"
 
     def test_extracts_num_pages(self, minimal_prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        bhp_ann = next(a for a in anns if a.asx_code == "BHP")
-        assert bhp_ann.num_pages == 12
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        bhp_filing = next(f for f in filings if f.ticker == "BHP")
+        assert bhp_filing.num_pages == 12
 
     def test_extracts_file_size(self, minimal_prevbusday_html):
-        anns, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
-        bhp_ann = next(a for a in anns if a.asx_code == "BHP")
-        assert bhp_ann.file_size == "250.0KB"
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        bhp_filing = next(f for f in filings if f.ticker == "BHP")
+        assert bhp_filing.file_size == "250.0KB"
 
     def test_row_with_fewer_than_4_tds_is_skipped(self):
         html = textwrap.dedent("""\
@@ -466,68 +548,82 @@ class TestParsePrevBusDayAnns:
             </announcement_data>
             </body></html>
         """)
-        anns, _ = parse_prev_bus_day_anns(html)
-        assert anns == []
+        filings, _ = parse_prev_bus_day_anns(html)
+        assert filings == []
+
+    def test_source_is_asx_in_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        for f in filings:
+            assert f.source == "asx"
+
+    def test_country_is_au_in_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        for f in filings:
+            assert f.country == "AU"
 
 
 # ---------------------------------------------------------------------------
-# classify_announcement_type() — headline type classification
+# classify_filing_type() — headline type classification
 # ---------------------------------------------------------------------------
 
 
-class TestClassifyAnnouncementType:
+class TestClassifyFilingType:
     def test_annual_report_classification(self):
-        assert classify_announcement_type("Annual Report 2024") == "annual_report"
+        assert classify_filing_type("Annual Report 2024") == "annual_report"
 
     def test_half_yearly_classification(self):
-        assert classify_announcement_type("Half-Year Results FY25") == "half_yearly"
+        assert classify_filing_type("Half-Year Results FY25") == "half_yearly"
 
     def test_quarterly_classification(self):
-        assert classify_announcement_type("Quarterly Activities Report") == "quarterly"
+        assert classify_filing_type("Quarterly Activities Report") == "quarterly"
 
     def test_financial_results_classification(self):
-        assert classify_announcement_type("Full Year Financial Results") == "financial_results"
+        assert classify_filing_type("Full Year Financial Results") == "financial_results"
 
     def test_dividend_classification(self):
-        assert classify_announcement_type("Dividend/Distribution - BHP") == "dividend"
+        assert classify_filing_type("Dividend/Distribution - BHP") == "dividend"
 
     def test_placement_classification(self):
-        assert classify_announcement_type("Share Placement Announcement") == "placement"
+        assert classify_filing_type("Share Placement Announcement") == "placement"
 
     def test_prospectus_classification(self):
-        assert classify_announcement_type("Prospectus filing") == "prospectus"
+        assert classify_filing_type("Prospectus filing") == "prospectus"
 
     def test_takeover_classification(self):
-        assert classify_announcement_type("Takeover Bid Notice") == "takeover"
+        assert classify_filing_type("Takeover Bid Notice") == "takeover"
 
     def test_buyback_classification(self):
-        assert classify_announcement_type("Buyback Programme Update") == "buyback"
+        assert classify_filing_type("Buyback Programme Update") == "buyback"
 
     def test_trading_halt_classification(self):
-        assert classify_announcement_type("Trading Halt") == "trading_halt"
+        assert classify_filing_type("Trading Halt") == "trading_halt"
 
     def test_cessation_classification(self):
-        assert classify_announcement_type("Notification of cessation of securities") == "cessation"
+        assert classify_filing_type("Notification of cessation of securities") == "cessation"
 
     def test_substantial_holder_classification(self):
-        assert classify_announcement_type("Substantial holder notice") == "substantial_holder"
+        assert classify_filing_type("Substantial holder notice") == "substantial_holder"
 
     def test_agm_classification(self):
-        assert classify_announcement_type("Notice of AGM") == "agm"
+        assert classify_filing_type("Notice of AGM") == "agm"
 
     def test_unrecognised_returns_other(self):
-        assert classify_announcement_type("Miscellaneous Company Update") == "other"
+        assert classify_filing_type("Miscellaneous Company Update") == "other"
 
     def test_empty_string_returns_other(self):
-        assert classify_announcement_type("") == "other"
+        assert classify_filing_type("") == "other"
 
     def test_case_insensitive_matching(self):
-        assert classify_announcement_type("ANNUAL REPORT") == "annual_report"
-        assert classify_announcement_type("annual report") == "annual_report"
+        assert classify_filing_type("ANNUAL REPORT") == "annual_report"
+        assert classify_filing_type("annual report") == "annual_report"
 
-    def test_announcements_have_type_field(self, minimal_announcements_html):
-        anns, _ = parse_announcements_do(minimal_announcements_html)
-        for ann in anns:
-            assert hasattr(ann, "announcement_type")
-            assert isinstance(ann.announcement_type, str)
-            assert len(ann.announcement_type) > 0
+    def test_classify_announcement_type_alias_works(self):
+        """Backwards-compat alias must behave identically."""
+        assert classify_announcement_type("Annual Report 2024") == "annual_report"
+
+    def test_filings_have_filing_type_field(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        for f in filings:
+            assert hasattr(f, "filing_type")
+            assert isinstance(f.filing_type, str)
+            assert len(f.filing_type) > 0

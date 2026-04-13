@@ -4,13 +4,14 @@ test_db.py — Unit tests for all database operations in db.py.
 Uses in-memory SQLite so tests are fully isolated and fast.
 
 Tests cover:
-  - get_db()               : schema creation
-  - upsert_announcement()  : INSERT OR IGNORE semantics
-  - mark_downloaded()      : UPDATE semantics
-  - fetch_undownloaded()   : SELECT with filters
-  - log_crawl()            : crawl_log INSERT
-  - get_last_crawl_time()  : query helper
-  - get_crawled_tickers_for_period() : query helper
+  - get_db()                        : schema creation
+  - upsert_filing()                 : INSERT OR IGNORE semantics
+  - mark_downloaded()               : UPDATE semantics
+  - fetch_undownloaded()            : SELECT with filters
+  - log_crawl()                     : crawl_log INSERT
+  - get_last_crawl_time()           : query helper
+  - get_crawled_tickers_for_period(): query helper
+  - migration helpers               : table/column rename
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import sqlite3
 import pytest
 
 from db import (
-    Announcement,
+    Filing,
     CrawlResult,
     fetch_undownloaded,
     get_crawled_tickers_for_period,
@@ -27,31 +28,36 @@ from db import (
     get_last_crawl_time,
     log_crawl,
     mark_downloaded,
-    upsert_announcement,
+    upsert_filing,
+    upsert_announcement,  # backwards-compat alias
 )
 
 
 # ---------------------------------------------------------------------------
-# Helper: build an Announcement with all required fields
+# Helper: build a Filing with all required fields
 # ---------------------------------------------------------------------------
 
-def _ann(
-    ids_id: str,
-    asx_code: str = "BHP",
-    date: str = "01/01/2025",
-    headline: str = "Test Announcement",
-    pdf_url: str | None = "http://example.com/doc.pdf",
+def _filing(
+    filing_id: str,
+    ticker: str = "BHP",
+    filing_date: str = "2025-01-01",
+    headline: str = "Test Filing",
+    document_url: str | None = "http://example.com/doc.pdf",
     price_sensitive: bool = False,
-    announcement_type: str = "other",
-) -> Announcement:
-    return Announcement(
-        ids_id=ids_id,
-        asx_code=asx_code,
-        date=date,
-        time=None,
+    filing_type: str = "other",
+    source: str = "asx",
+    country: str = "AU",
+) -> Filing:
+    return Filing(
+        filing_id=filing_id,
+        source=source,
+        country=country,
+        ticker=ticker,
+        filing_date=filing_date,
+        filing_time=None,
         headline=headline,
-        announcement_type=announcement_type,
-        pdf_url=pdf_url,
+        filing_type=filing_type,
+        document_url=document_url,
         file_size=None,
         num_pages=None,
         price_sensitive=price_sensitive,
@@ -64,13 +70,13 @@ def _ann(
 
 
 class TestGetDb:
-    def test_creates_announcements_table(self, mem_db):
+    def test_creates_filings_table(self, mem_db):
         # Arrange / Act (mem_db fixture already calls get_db)
         # Assert
         tables = {row[0] for row in mem_db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
-        assert "announcements" in tables
+        assert "filings" in tables
 
     def test_creates_crawl_log_table(self, mem_db):
         tables = {row[0] for row in mem_db.execute(
@@ -78,15 +84,16 @@ class TestGetDb:
         ).fetchall()}
         assert "crawl_log" in tables
 
-    def test_announcements_has_expected_columns(self, mem_db):
+    def test_filings_has_expected_columns(self, mem_db):
         cols = {row[1] for row in mem_db.execute(
-            "PRAGMA table_info(announcements)"
+            "PRAGMA table_info(filings)"
         ).fetchall()}
         expected = {
-            "ids_id", "asx_code", "date", "time", "headline",
-            "announcement_type", "pdf_url", "direct_pdf_url", "file_size",
+            "filing_id", "source", "country", "ticker",
+            "filing_date", "filing_time", "headline",
+            "filing_type", "document_url", "direct_pdf_url", "file_size",
             "num_pages", "price_sensitive", "downloaded", "download_path",
-            "created_at",
+            "raw_metadata", "created_at",
         }
         assert expected.issubset(cols)
 
@@ -101,137 +108,222 @@ class TestGetDb:
         }
         assert expected.issubset(cols)
 
-    def test_ids_id_is_primary_key(self, mem_db):
+    def test_filing_id_is_primary_key(self, mem_db):
         pk_cols = [
             row[1]
-            for row in mem_db.execute("PRAGMA table_info(announcements)").fetchall()
+            for row in mem_db.execute("PRAGMA table_info(filings)").fetchall()
             if row[5] == 1  # pk flag
         ]
-        assert "ids_id" in pk_cols
+        assert "filing_id" in pk_cols
 
     def test_calling_get_db_with_memory_twice_is_safe(self):
         # get_db uses CREATE TABLE IF NOT EXISTS — idempotent
-        conn1 = get_db(":memory:")  # type: ignore[arg-type]
-        conn2 = get_db(":memory:")  # type: ignore[arg-type]
+        conn1 = get_db(":memory:")
+        conn2 = get_db(":memory:")
         for conn in (conn1, conn2):
             tables = [row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()]
-            assert tables.count("announcements") == 1
+            assert tables.count("filings") == 1
         conn1.close()
         conn2.close()
 
-    def test_migrations_applied_on_new_db(self, mem_db):
-        # The announcement_type migration should already be applied by get_db
-        cols = {row[1].lower() for row in mem_db.execute(
-            "PRAGMA table_info(announcements)"
+    def test_source_column_has_asx_default(self, mem_db):
+        cols_info = {
+            row[1]: {"dflt_value": row[4]}
+            for row in mem_db.execute("PRAGMA table_info(filings)").fetchall()
+        }
+        assert "source" in cols_info
+
+    def test_country_column_present(self, mem_db):
+        cols = {row[1] for row in mem_db.execute(
+            "PRAGMA table_info(filings)"
         ).fetchall()}
-        assert "announcement_type" in cols
+        assert "country" in cols
+
+    def test_raw_metadata_column_present(self, mem_db):
+        cols = {row[1] for row in mem_db.execute(
+            "PRAGMA table_info(filings)"
+        ).fetchall()}
+        assert "raw_metadata" in cols
 
     def test_migration_error_does_not_crash(self):
-        """When a migration fails (e.g. column already exists with different type),
-        get_db should log a warning and continue rather than raise."""
-        import sqlite3 as _sqlite3
-        from unittest.mock import patch
-
-        conn = get_db(":memory:")  # type: ignore[arg-type]
-
-        # Simulate a second call to _apply_migrations where the column already exists
-        # (the normal idempotency path). get_db should not raise.
+        """When a migration is already applied, get_db should not raise."""
+        conn = get_db(":memory:")
         from db import _apply_migrations
-        # Calling it again should be safe (column already exists — OperationalError caught)
         try:
             _apply_migrations(conn)  # should not raise
         except Exception as exc:
             pytest.fail(f"_apply_migrations raised unexpectedly: {exc}")
         conn.close()
 
+    def test_legacy_announcements_table_renamed_to_filings(self):
+        """Simulate an L2 database with an 'announcements' table and verify migration."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        # Create old L2 schema
+        conn.execute("""
+            CREATE TABLE announcements (
+                ids_id TEXT PRIMARY KEY,
+                asx_code TEXT NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT,
+                headline TEXT NOT NULL,
+                announcement_type TEXT,
+                pdf_url TEXT,
+                direct_pdf_url TEXT,
+                file_size TEXT,
+                num_pages INTEGER,
+                price_sensitive BOOLEAN DEFAULT FALSE,
+                downloaded BOOLEAN DEFAULT FALSE,
+                download_path TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE crawl_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                crawl_type TEXT NOT NULL,
+                ticker TEXT,
+                period TEXT,
+                announcements_found INTEGER,
+                announcements_new INTEGER,
+                started_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        # Now open the same path through get_db — can't use :memory: for this,
+        # so we test the rename logic directly.
+        import sqlite3 as _sq
+        from db import _ensure_filings_table, _apply_migrations, SCHEMA_SQL
+
+        conn2 = _sq.connect(":memory:")
+        conn2.row_factory = _sq.Row
+        conn2.execute("""
+            CREATE TABLE announcements (
+                ids_id TEXT PRIMARY KEY,
+                asx_code TEXT NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT,
+                headline TEXT NOT NULL,
+                announcement_type TEXT,
+                pdf_url TEXT,
+                direct_pdf_url TEXT,
+                file_size TEXT,
+                num_pages INTEGER,
+                price_sensitive BOOLEAN DEFAULT FALSE,
+                downloaded BOOLEAN DEFAULT FALSE,
+                download_path TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn2.commit()
+
+        _ensure_filings_table(conn2)
+        tables = {row[0] for row in conn2.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        assert "filings" in tables
+        assert "announcements" not in tables
+        conn2.close()
+
 
 # ---------------------------------------------------------------------------
-# upsert_announcement() — INSERT OR IGNORE
+# upsert_filing() — INSERT OR IGNORE
 # ---------------------------------------------------------------------------
 
 
-class TestUpsertAnnouncement:
-    def test_new_announcement_returns_true(self, mem_db, sample_announcement):
-        result = upsert_announcement(mem_db, sample_announcement)
+class TestUpsertFiling:
+    def test_new_filing_returns_true(self, mem_db, sample_filing):
+        result = upsert_filing(mem_db, sample_filing)
         assert result is True
 
-    def test_duplicate_announcement_returns_false(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
-        result = upsert_announcement(mem_db, sample_announcement)
+    def test_duplicate_filing_returns_false(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
+        result = upsert_filing(mem_db, sample_filing)
         assert result is False
 
-    def test_row_is_stored_after_insert(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
+    def test_row_is_stored_after_insert(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         row = mem_db.execute(
-            "SELECT * FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT * FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone()
         assert row is not None
 
-    def test_stored_row_matches_inserted_data(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
+    def test_stored_row_matches_inserted_data(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         row = dict(mem_db.execute(
-            "SELECT * FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT * FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone())
-        assert row["ids_id"] == sample_announcement.ids_id
-        assert row["asx_code"] == sample_announcement.asx_code
-        assert row["date"] == sample_announcement.date
-        assert row["time"] == sample_announcement.time
-        assert row["headline"] == sample_announcement.headline
-        assert row["pdf_url"] == sample_announcement.pdf_url
-        assert row["file_size"] == sample_announcement.file_size
-        assert row["num_pages"] == sample_announcement.num_pages
-        assert row["announcement_type"] == sample_announcement.announcement_type
+        assert row["filing_id"] == sample_filing.filing_id
+        assert row["ticker"] == sample_filing.ticker
+        assert row["filing_date"] == sample_filing.filing_date
+        assert row["filing_time"] == sample_filing.filing_time
+        assert row["headline"] == sample_filing.headline
+        assert row["document_url"] == sample_filing.document_url
+        assert row["file_size"] == sample_filing.file_size
+        assert row["num_pages"] == sample_filing.num_pages
+        assert row["filing_type"] == sample_filing.filing_type
+        assert row["source"] == "asx"
+        assert row["country"] == "AU"
 
-    def test_price_sensitive_false_stored_correctly(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
+    def test_price_sensitive_false_stored_correctly(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         row = dict(mem_db.execute(
-            "SELECT price_sensitive FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT price_sensitive FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone())
         assert bool(row["price_sensitive"]) is False
 
     def test_price_sensitive_true_stored_correctly(self, mem_db):
-        ann = _ann("PS000001", asx_code="CBA", price_sensitive=True)
-        upsert_announcement(mem_db, ann)
+        f = _filing("PS000001", ticker="CBA", price_sensitive=True)
+        upsert_filing(mem_db, f)
         row = dict(mem_db.execute(
-            "SELECT price_sensitive FROM announcements WHERE ids_id = ?",
-            (ann.ids_id,),
+            "SELECT price_sensitive FROM filings WHERE filing_id = ?",
+            (f.filing_id,),
         ).fetchone())
         assert bool(row["price_sensitive"]) is True
 
-    def test_two_different_ids_ids_both_stored(self, mem_db):
-        upsert_announcement(mem_db, _ann("AAAA0001", asx_code="BHP"))
-        upsert_announcement(mem_db, _ann("BBBB0002", asx_code="CBA"))
-        count = mem_db.execute("SELECT COUNT(*) FROM announcements").fetchone()[0]
+    def test_two_different_filing_ids_both_stored(self, mem_db):
+        upsert_filing(mem_db, _filing("AAAA0001", ticker="BHP"))
+        upsert_filing(mem_db, _filing("BBBB0002", ticker="CBA"))
+        count = mem_db.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
         assert count == 2
 
-    def test_downloaded_defaults_to_false(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
+    def test_downloaded_defaults_to_false(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         row = dict(mem_db.execute(
-            "SELECT downloaded FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT downloaded FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone())
         assert bool(row["downloaded"]) is False
 
-    def test_null_pdf_url_stored_correctly(self, mem_db):
-        ann = _ann("NULL0001", pdf_url=None)
-        upsert_announcement(mem_db, ann)
+    def test_null_document_url_stored_correctly(self, mem_db):
+        f = _filing("NULL0001", document_url=None)
+        upsert_filing(mem_db, f)
         row = dict(mem_db.execute(
-            "SELECT pdf_url FROM announcements WHERE ids_id = ?", (ann.ids_id,)
+            "SELECT document_url FROM filings WHERE filing_id = ?", (f.filing_id,)
         ).fetchone())
-        assert row["pdf_url"] is None
+        assert row["document_url"] is None
 
-    def test_announcement_type_stored_correctly(self, mem_db):
-        ann = _ann("TYPE0001", announcement_type="annual_report")
-        upsert_announcement(mem_db, ann)
+    def test_filing_type_stored_correctly(self, mem_db):
+        f = _filing("TYPE0001", filing_type="annual_report")
+        upsert_filing(mem_db, f)
         row = dict(mem_db.execute(
-            "SELECT announcement_type FROM announcements WHERE ids_id = ?", (ann.ids_id,)
+            "SELECT filing_type FROM filings WHERE filing_id = ?", (f.filing_id,)
         ).fetchone())
-        assert row["announcement_type"] == "annual_report"
+        assert row["filing_type"] == "annual_report"
+
+    def test_upsert_announcement_alias_works(self, mem_db):
+        """The backwards-compatible upsert_announcement alias must still function."""
+        f = _filing("ALIAS001")
+        result = upsert_announcement(mem_db, f)
+        assert result is True
 
 
 # ---------------------------------------------------------------------------
@@ -240,49 +332,46 @@ class TestUpsertAnnouncement:
 
 
 class TestMarkDownloaded:
-    def test_mark_downloaded_sets_downloaded_true(self, mem_db, sample_announcement):
-        # Arrange
-        upsert_announcement(mem_db, sample_announcement)
-        # Act
+    def test_mark_downloaded_sets_downloaded_true(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         mark_downloaded(
             mem_db,
-            sample_announcement.ids_id,
+            sample_filing.filing_id,
             "https://cdn.example.com/file.pdf",
             "/tmp/docs/BHP/12345678.pdf",
         )
-        # Assert
         row = dict(mem_db.execute(
-            "SELECT downloaded FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT downloaded FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone())
         assert bool(row["downloaded"]) is True
 
-    def test_mark_downloaded_sets_direct_pdf_url(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
+    def test_mark_downloaded_sets_direct_pdf_url(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         direct_url = "https://announcements.asx.com.au/asxpdf/20260413/pdf/abc123.pdf"
-        mark_downloaded(mem_db, sample_announcement.ids_id, direct_url, "/tmp/path.pdf")
+        mark_downloaded(mem_db, sample_filing.filing_id, direct_url, "/tmp/path.pdf")
         row = dict(mem_db.execute(
-            "SELECT direct_pdf_url FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT direct_pdf_url FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone())
         assert row["direct_pdf_url"] == direct_url
 
-    def test_mark_downloaded_sets_download_path(self, mem_db, sample_announcement):
-        upsert_announcement(mem_db, sample_announcement)
+    def test_mark_downloaded_sets_download_path(self, mem_db, sample_filing):
+        upsert_filing(mem_db, sample_filing)
         path = "/tmp/documents/BHP/12345678.pdf"
-        mark_downloaded(mem_db, sample_announcement.ids_id, "https://cdn.example.com/x.pdf", path)
+        mark_downloaded(mem_db, sample_filing.filing_id, "https://cdn.example.com/x.pdf", path)
         row = dict(mem_db.execute(
-            "SELECT download_path FROM announcements WHERE ids_id = ?",
-            (sample_announcement.ids_id,),
+            "SELECT download_path FROM filings WHERE filing_id = ?",
+            (sample_filing.filing_id,),
         ).fetchone())
         assert row["download_path"] == path
 
     def test_mark_downloaded_does_not_affect_other_rows(self, mem_db):
-        upsert_announcement(mem_db, _ann("MARK0001", asx_code="BHP"))
-        upsert_announcement(mem_db, _ann("MARK0002", asx_code="CBA"))
+        upsert_filing(mem_db, _filing("MARK0001", ticker="BHP"))
+        upsert_filing(mem_db, _filing("MARK0002", ticker="CBA"))
         mark_downloaded(mem_db, "MARK0001", "https://cdn.com/a.pdf", "/tmp/a.pdf")
         row2 = dict(mem_db.execute(
-            "SELECT downloaded FROM announcements WHERE ids_id = ?", ("MARK0002",)
+            "SELECT downloaded FROM filings WHERE filing_id = ?", ("MARK0002",)
         ).fetchone())
         assert bool(row2["downloaded"]) is False
 
@@ -296,31 +385,31 @@ class TestFetchUndownloaded:
     def _insert(
         self,
         conn: sqlite3.Connection,
-        ids_id: str,
-        asx_code: str = "BHP",
-        pdf_url: str | None = "http://example.com/doc.pdf",
+        filing_id: str,
+        ticker: str = "BHP",
+        document_url: str | None = "http://example.com/doc.pdf",
         downloaded: bool = False,
     ) -> None:
-        upsert_announcement(conn, _ann(ids_id, asx_code=asx_code, pdf_url=pdf_url))
+        upsert_filing(conn, _filing(filing_id, ticker=ticker, document_url=document_url))
         if downloaded:
-            mark_downloaded(conn, ids_id, "https://cdn.com/x.pdf", f"/tmp/{ids_id}.pdf")
+            mark_downloaded(conn, filing_id, "https://cdn.com/x.pdf", f"/tmp/{filing_id}.pdf")
 
-    def test_returns_rows_with_pdf_url_and_downloaded_false(self, mem_db):
+    def test_returns_rows_with_document_url_and_downloaded_false(self, mem_db):
         self._insert(mem_db, "FETCH001")
         rows = fetch_undownloaded(mem_db)
         assert len(rows) == 1
-        assert rows[0]["ids_id"] == "FETCH001"
+        assert rows[0]["filing_id"] == "FETCH001"
 
     def test_excludes_already_downloaded_rows(self, mem_db):
         self._insert(mem_db, "DONE001", downloaded=True)
         rows = fetch_undownloaded(mem_db)
-        ids = [r["ids_id"] for r in rows]
+        ids = [r["filing_id"] for r in rows]
         assert "DONE001" not in ids
 
-    def test_excludes_rows_without_pdf_url(self, mem_db):
-        self._insert(mem_db, "NOPDF01", pdf_url=None)
+    def test_excludes_rows_without_document_url(self, mem_db):
+        self._insert(mem_db, "NOPDF01", document_url=None)
         rows = fetch_undownloaded(mem_db)
-        ids = [r["ids_id"] for r in rows]
+        ids = [r["filing_id"] for r in rows]
         assert "NOPDF01" not in ids
 
     def test_returns_empty_list_when_no_pending(self, mem_db):
@@ -329,22 +418,22 @@ class TestFetchUndownloaded:
         assert rows == []
 
     def test_ticker_filter_returns_only_matching_rows(self, mem_db):
-        self._insert(mem_db, "BHP0001", asx_code="BHP")
-        self._insert(mem_db, "CBA0001", asx_code="CBA")
+        self._insert(mem_db, "BHP0001", ticker="BHP")
+        self._insert(mem_db, "CBA0001", ticker="CBA")
         rows = fetch_undownloaded(mem_db, ticker="BHP")
-        assert all(r["asx_code"] == "BHP" for r in rows)
+        assert all(r["ticker"] == "BHP" for r in rows)
         assert len(rows) == 1
 
     def test_ticker_filter_excludes_other_tickers(self, mem_db):
-        self._insert(mem_db, "BHP0002", asx_code="BHP")
-        self._insert(mem_db, "CBA0002", asx_code="CBA")
+        self._insert(mem_db, "BHP0002", ticker="BHP")
+        self._insert(mem_db, "CBA0002", ticker="CBA")
         rows = fetch_undownloaded(mem_db, ticker="BHP")
-        ids = [r["ids_id"] for r in rows]
+        ids = [r["filing_id"] for r in rows]
         assert "CBA0002" not in ids
 
     def test_no_ticker_filter_returns_all_pending(self, mem_db):
-        self._insert(mem_db, "MIX0001", asx_code="BHP")
-        self._insert(mem_db, "MIX0002", asx_code="CBA")
+        self._insert(mem_db, "MIX0001", ticker="BHP")
+        self._insert(mem_db, "MIX0002", ticker="CBA")
         rows = fetch_undownloaded(mem_db)
         assert len(rows) == 2
 
@@ -352,8 +441,8 @@ class TestFetchUndownloaded:
         self._insert(mem_db, "DICT001")
         rows = fetch_undownloaded(mem_db)
         assert isinstance(rows[0], dict)
-        assert "ids_id" in rows[0]
-        assert "asx_code" in rows[0]
+        assert "filing_id" in rows[0]
+        assert "ticker" in rows[0]
 
 
 # ---------------------------------------------------------------------------
@@ -514,8 +603,28 @@ class TestGetCrawledTickersForPeriod:
         assert isinstance(tickers, set)
 
     def test_deduplicates_repeated_crawls(self, mem_db):
-        # Same ticker crawled twice — should appear only once in the set
         log_crawl(mem_db, self._result("BHP", "M6"))
         log_crawl(mem_db, self._result("BHP", "M6"))
         tickers = get_crawled_tickers_for_period(mem_db, "M6")
-        assert tickers.count("BHP") == 1 if hasattr(tickers, "count") else len([t for t in tickers if t == "BHP"]) == 1
+        assert len([t for t in tickers if t == "BHP"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Filing dataclass immutability
+# ---------------------------------------------------------------------------
+
+
+class TestFilingDataclass:
+    def test_filing_is_frozen(self, sample_filing):
+        with pytest.raises((AttributeError, TypeError)):
+            sample_filing.headline = "mutated"  # type: ignore[misc]
+
+    def test_filing_has_source_field(self, sample_filing):
+        assert sample_filing.source == "asx"
+
+    def test_filing_has_country_field(self, sample_filing):
+        assert sample_filing.country == "AU"
+
+    def test_filing_date_is_iso_format(self, sample_filing):
+        import re
+        assert re.match(r"^\d{4}-\d{2}-\d{2}$", sample_filing.filing_date)

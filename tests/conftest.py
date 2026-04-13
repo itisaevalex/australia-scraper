@@ -23,7 +23,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 @pytest.fixture(scope="session")
 def bhp_html() -> str:
-    """Real BHP per-company announcement HTML captured from ASX."""
+    """Real BHP per-company filing HTML captured from ASX."""
     path = FIXTURES_DIR / "announcements_bhp.html"
     return path.read_text(encoding="utf-8")
 
@@ -165,33 +165,41 @@ def terms_page_without_pdf_url() -> str:
 @pytest.fixture
 def mem_db() -> sqlite3.Connection:
     """Fresh in-memory SQLite connection with the full schema applied."""
-    # Import here to avoid import-time side-effects at collection time.
     from db import get_db
 
-    conn = get_db(db_path=":memory:")  # type: ignore[arg-type]
+    conn = get_db(db_path=":memory:")
     yield conn
     conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Sample Announcement object
+# Sample Filing object
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def sample_announcement():
-    """A valid Announcement dataclass instance for DB tests."""
-    from db import Announcement
+def sample_filing():
+    """A valid Filing dataclass instance for DB tests."""
+    from db import Filing
 
-    return Announcement(
-        ids_id="12345678",
-        asx_code="BHP",
-        date="13/04/2026",
-        time="5:07 pm",
+    return Filing(
+        filing_id="12345678",
+        source="asx",
+        country="AU",
+        ticker="BHP",
+        filing_date="2026-04-13",
+        filing_time="5:07 pm",
         headline="Annual Report 2025",
-        announcement_type="annual_report",
-        pdf_url="https://www.asx.com.au/asx/v2/statistics/displayAnnouncement.do?display=pdf&idsId=12345678",
+        filing_type="annual_report",
+        document_url="https://www.asx.com.au/asx/v2/statistics/displayAnnouncement.do?display=pdf&idsId=12345678",
         file_size="120.0KB",
         num_pages=42,
         price_sensitive=False,
     )
+
+
+# Backwards-compatible alias so existing tests using sample_announcement still work
+@pytest.fixture
+def sample_announcement(sample_filing):
+    """Alias for sample_filing for backwards compatibility."""
+    return sample_filing

@@ -2,7 +2,7 @@
 downloader.py — PDF resolution and download helpers for the ASX scraper.
 
 Two-step PDF resolution:
-  1. GET displayAnnouncement.do?display=pdf&idsId=... -> HTML terms page
+  1. GET displayAnnouncement.do?display=pdf&filing_id=... -> HTML terms page
   2. Parse <input name="pdfURL"> -> real CDN URL
 
 Downloads are parallelised with ThreadPoolExecutor. Each worker creates its
@@ -40,7 +40,7 @@ except ImportError:
 
 
 def resolve_direct_pdf_url(session: requests.Session, ids_id: str) -> str | None:
-    """Resolve the real CDN PDF URL for a given idsId.
+    """Resolve the real CDN PDF URL for a given filing_id.
 
     Performs a two-step HTTP dance:
       1. Fetch the displayAnnouncement terms page.
@@ -48,7 +48,7 @@ def resolve_direct_pdf_url(session: requests.Session, ids_id: str) -> str | None
 
     Args:
         session: An active requests.Session.
-        ids_id:  The ASX announcement identifier string.
+        ids_id:  The ASX filing identifier string.
 
     Returns:
         The direct CDN URL string, or None if resolution fails.
@@ -61,32 +61,32 @@ def resolve_direct_pdf_url(session: requests.Session, ids_id: str) -> str | None
     pdf_input = soup.find("input", {"name": "pdfURL"})
     if pdf_input and pdf_input.get("value"):
         return str(pdf_input["value"])
-    log.debug("No pdfURL input found for idsId=%s", ids_id)
+    log.debug("No pdfURL input found for filing_id=%s", ids_id)
     return None
 
 
 def download_pdf(
-    session: requests.Session, ids_id: str, asx_code: str, direct_url: str
+    session: requests.Session, ids_id: str, ticker: str, direct_url: str
 ) -> tuple[str, str] | None:
-    """Download a PDF to documents/{asx_code}/{ids_id}.pdf.
+    """Download a PDF to documents/{ticker}/{ids_id}.pdf.
 
     Validates identifiers before writing to disk to prevent path traversal.
     Skips files that already exist (idempotent).
 
     Args:
         session:    An active requests.Session.
-        ids_id:     The ASX announcement identifier.
-        asx_code:   The ASX company ticker code.
+        ids_id:     The ASX filing identifier.
+        ticker:     The ASX company ticker code.
         direct_url: The resolved CDN PDF URL.
 
     Returns:
         A tuple of (direct_url, local_path) on success, or None on failure.
     """
-    if not TICKER_RE.match(asx_code) or not IDS_ID_RE.match(ids_id):
-        log.warning("Rejected suspicious asx_code=%r ids_id=%r", asx_code, ids_id)
+    if not TICKER_RE.match(ticker) or not IDS_ID_RE.match(ids_id):
+        log.warning("Rejected suspicious ticker=%r ids_id=%r", ticker, ids_id)
         return None
 
-    dest_dir = DOCUMENTS_DIR / asx_code
+    dest_dir = DOCUMENTS_DIR / ticker
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / f"{ids_id}.pdf"
 
@@ -125,27 +125,27 @@ def _resolve_and_download_worker(row: dict) -> tuple[str, str, str] | None:
     Does NO database writes — SQLite is not thread-safe.
 
     Args:
-        row: A dict representing an announcements DB row.
+        row: A dict representing a filings DB row.
 
     Returns:
-        A tuple of (ids_id, direct_url, local_path) on success, or None.
+        A tuple of (filing_id, direct_url, local_path) on success, or None.
     """
     session = make_session()
-    ids_id = row["ids_id"]
-    asx_code = row["asx_code"]
+    filing_id = row["filing_id"]
+    ticker = row["ticker"]
 
-    direct_url = resolve_direct_pdf_url(session, ids_id)
+    direct_url = resolve_direct_pdf_url(session, filing_id)
     if not direct_url:
-        log.warning("Could not resolve PDF URL for ids_id=%s", ids_id)
+        log.warning("Could not resolve PDF URL for filing_id=%s", filing_id)
         return None
 
-    result = download_pdf(session, ids_id, asx_code, direct_url)
+    result = download_pdf(session, filing_id, ticker, direct_url)
     if result:
         url, path = result
-        log.info("Downloaded %s -> %s", ids_id, path)
-        return ids_id, url, path
+        log.info("Downloaded %s -> %s", filing_id, path)
+        return filing_id, url, path
 
-    log.warning("PDF download failed for ids_id=%s", ids_id)
+    log.warning("PDF download failed for filing_id=%s", filing_id)
     return None
 
 
@@ -159,7 +159,7 @@ def batch_download(
 
     Args:
         conn:    The main-thread SQLite connection for DB writes.
-        rows:    List of announcement dicts with ids_id/asx_code fields.
+        rows:    List of filing dicts with filing_id/ticker fields.
         workers: Number of parallel download threads.
 
     Returns:
@@ -174,21 +174,21 @@ def batch_download(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_resolve_and_download_worker, row): row["ids_id"]
+            executor.submit(_resolve_and_download_worker, row): row["filing_id"]
             for row in rows
         }
         for future in as_completed(futures):
-            ids_id = futures[future]
+            filing_id = futures[future]
             try:
                 result = future.result()
                 if result:
                     completed.append(result)
             except Exception as exc:
-                log.error("Unexpected error downloading ids_id=%s: %s", ids_id, exc)
+                log.error("Unexpected error downloading filing_id=%s: %s", filing_id, exc)
 
     # Update database from main thread (SQLite is single-threaded)
-    for ids_id, direct_url, path in completed:
-        mark_downloaded(conn, ids_id, direct_url, path)
+    for filing_id, direct_url, path in completed:
+        mark_downloaded(conn, filing_id, direct_url, path)
 
     log.info("Download complete: %d/%d succeeded", len(completed), len(rows))
     return len(completed)

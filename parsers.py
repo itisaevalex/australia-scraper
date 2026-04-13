@@ -1,23 +1,24 @@
 """
-parsers.py — HTML parsing and announcement type classification.
+parsers.py — HTML parsing and filing type classification.
 
 Parses two ASX HTML endpoints:
   - announcements.do  (per-company view)
   - prevBusDayAnns.do (all-company previous business day view)
 
-Also provides announcement type classification via regex patterns.
+Also provides filing type classification via regex patterns.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
 
-from db import Announcement
+from db import Filing
 
 log = logging.getLogger("asx_scraper")
 
@@ -30,7 +31,7 @@ except ImportError:
     BS_PARSER = "html.parser"
 
 # ---------------------------------------------------------------------------
-# Announcement type classification
+# Filing type classification
 # ---------------------------------------------------------------------------
 
 # Ordered list of (type_name, compiled_regex) pairs. First match wins.
@@ -55,13 +56,13 @@ TYPE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def classify_announcement_type(headline: str) -> str:
-    """Return the first matching announcement type label or 'other'.
+def classify_filing_type(headline: str) -> str:
+    """Return the first matching filing type label or 'other'.
 
     Iterates TYPE_PATTERNS in order; first match wins.
 
     Args:
-        headline: The announcement headline text.
+        headline: The filing headline text.
 
     Returns:
         A lowercase type string such as 'annual_report' or 'other'.
@@ -70,6 +71,33 @@ def classify_announcement_type(headline: str) -> str:
         if pattern.search(headline):
             return type_name
     return "other"
+
+
+# Backwards-compatible alias
+classify_announcement_type = classify_filing_type
+
+
+# ---------------------------------------------------------------------------
+# Date normalisation
+# ---------------------------------------------------------------------------
+
+
+def _normalize_date(raw: str) -> str:
+    """Convert DD/MM/YYYY to YYYY-MM-DD. Returns raw if parse fails.
+
+    Args:
+        raw: Date string potentially in DD/MM/YYYY format.
+
+    Returns:
+        ISO 8601 date string (YYYY-MM-DD) on success, or the original raw
+        string when the format cannot be parsed.
+    """
+    raw = raw.strip()
+    try:
+        dt = datetime.strptime(raw, "%d/%m/%Y")
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return raw
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +130,10 @@ def _is_price_sensitive(td: Any) -> bool:
 
 
 def _parse_headline_td(td: Any) -> dict[str, Any]:
-    """Parse the headline <td>, returning headline, pdf_url, ids_id, file_size, num_pages."""
+    """Parse the headline <td>, returning headline, document_url, ids_id, file_size, num_pages."""
     result: dict[str, Any] = {
         "headline": None,
-        "pdf_url": None,
+        "document_url": None,
         "ids_id": None,
         "file_size": None,
         "num_pages": None,
@@ -115,7 +143,7 @@ def _parse_headline_td(td: Any) -> dict[str, Any]:
         return result
 
     href = anchor.get("href", "")
-    result["pdf_url"] = (ASX_BASE + href) if href.startswith("/") else href
+    result["document_url"] = (ASX_BASE + href) if href.startswith("/") else href
     result["ids_id"] = _extract_ids_id(href)
 
     for node in anchor.children:
@@ -142,7 +170,7 @@ def _parse_headline_td(td: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def parse_announcements_do(html: str) -> tuple[list[Announcement], list[str]]:
+def parse_announcements_do(html: str) -> tuple[list[Filing], list[str]]:
     """Parse /asx/v2/statistics/announcements.do HTML.
 
     Column order: Date/Time | Price sens. | Headline
@@ -152,10 +180,10 @@ def parse_announcements_do(html: str) -> tuple[list[Announcement], list[str]]:
         html: Raw HTML response body.
 
     Returns:
-        A tuple of (announcements, error_strings).
+        A tuple of (filings, error_strings).
     """
     soup = BeautifulSoup(html, BS_PARSER)
-    announcements: list[Announcement] = []
+    filings: list[Filing] = []
     errors: list[str] = []
 
     asx_code: str | None = None
@@ -168,12 +196,12 @@ def parse_announcements_do(html: str) -> tuple[list[Announcement], list[str]]:
     ann_data = soup.find("announcement_data")
     if ann_data is None:
         errors.append("announcements.do: <announcement_data> tag not found")
-        return announcements, errors
+        return filings, errors
 
     table = ann_data.find("table")
     if table is None:
         errors.append("announcements.do: no <table> inside <announcement_data>")
-        return announcements, errors
+        return filings, errors
 
     tbody = table.find("tbody")
     rows = tbody.find_all("tr") if tbody else table.find_all("tr")[1:]
@@ -192,17 +220,19 @@ def parse_announcements_do(html: str) -> tuple[list[Announcement], list[str]]:
             if not hl["ids_id"] or not hl["headline"]:
                 continue
 
-            ann_type = classify_announcement_type(hl["headline"])
+            filing_type = classify_filing_type(hl["headline"])
 
-            announcements.append(
-                Announcement(
-                    ids_id=hl["ids_id"],
-                    asx_code=asx_code or "",
-                    date=date_raw,
-                    time=time_val,
+            filings.append(
+                Filing(
+                    filing_id=hl["ids_id"],
+                    source="asx",
+                    country="AU",
+                    ticker=asx_code or "",
+                    filing_date=_normalize_date(date_raw),
+                    filing_time=time_val,
                     headline=hl["headline"],
-                    announcement_type=ann_type,
-                    pdf_url=hl["pdf_url"],
+                    filing_type=filing_type,
+                    document_url=hl["document_url"],
                     file_size=hl["file_size"],
                     num_pages=hl["num_pages"],
                     price_sensitive=price_sens,
@@ -211,10 +241,10 @@ def parse_announcements_do(html: str) -> tuple[list[Announcement], list[str]]:
         except Exception as exc:
             errors.append(f"announcements.do row {i}: {exc}")
 
-    return announcements, errors
+    return filings, errors
 
 
-def parse_prev_bus_day_anns(html: str) -> tuple[list[Announcement], list[str]]:
+def parse_prev_bus_day_anns(html: str) -> tuple[list[Filing], list[str]]:
     """Parse /asx/v2/statistics/prevBusDayAnns.do HTML.
 
     Column order: ASX Code | Date/Time | Price sens. | Headline
@@ -223,21 +253,21 @@ def parse_prev_bus_day_anns(html: str) -> tuple[list[Announcement], list[str]]:
         html: Raw HTML response body.
 
     Returns:
-        A tuple of (announcements, error_strings).
+        A tuple of (filings, error_strings).
     """
     soup = BeautifulSoup(html, BS_PARSER)
-    announcements: list[Announcement] = []
+    filings: list[Filing] = []
     errors: list[str] = []
 
     ann_data = soup.find("announcement_data")
     if ann_data is None:
         errors.append("prevBusDayAnns.do: <announcement_data> tag not found")
-        return announcements, errors
+        return filings, errors
 
     table = ann_data.find("table")
     if table is None:
         errors.append("prevBusDayAnns.do: no <table> inside <announcement_data>")
-        return announcements, errors
+        return filings, errors
 
     data_rows = [r for r in table.find_all("tr") if r.find("td")]
 
@@ -256,17 +286,19 @@ def parse_prev_bus_day_anns(html: str) -> tuple[list[Announcement], list[str]]:
             if not hl["ids_id"] or not hl["headline"]:
                 continue
 
-            ann_type = classify_announcement_type(hl["headline"])
+            filing_type = classify_filing_type(hl["headline"])
 
-            announcements.append(
-                Announcement(
-                    ids_id=hl["ids_id"],
-                    asx_code=asx_code,
-                    date=date_raw,
-                    time=time_val,
+            filings.append(
+                Filing(
+                    filing_id=hl["ids_id"],
+                    source="asx",
+                    country="AU",
+                    ticker=asx_code,
+                    filing_date=_normalize_date(date_raw),
+                    filing_time=time_val,
                     headline=hl["headline"],
-                    announcement_type=ann_type,
-                    pdf_url=hl["pdf_url"],
+                    filing_type=filing_type,
+                    document_url=hl["document_url"],
                     file_size=hl["file_size"],
                     num_pages=hl["num_pages"],
                     price_sensitive=price_sens,
@@ -275,4 +307,4 @@ def parse_prev_bus_day_anns(html: str) -> tuple[list[Announcement], list[str]]:
         except Exception as exc:
             errors.append(f"prevBusDayAnns.do row {i}: {exc}")
 
-    return announcements, errors
+    return filings, errors
