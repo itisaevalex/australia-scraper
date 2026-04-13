@@ -66,7 +66,7 @@ TICKER_RE = re.compile(r"^[A-Z0-9]{2,6}$")
 IDS_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
 DB_PATH = Path("filings_cache.db")
 DOCUMENTS_DIR = Path("documents")
-FETCH_DELAY = 0.3  # seconds between page fetches
+FETCH_DELAY = 0.05  # seconds between page fetches (no rate limiting detected)
 
 try:
     import lxml  # noqa: F401
@@ -153,6 +153,8 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Open (or create) the SQLite cache and ensure the schema exists."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA_SQL)
     conn.commit()
     return conn
@@ -160,7 +162,7 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 def upsert_announcement(conn: sqlite3.Connection, ann: Announcement) -> bool:
     """Insert announcement if not already present. Returns True when new."""
-    conn.execute(
+    cur = conn.execute(
         """
         INSERT OR IGNORE INTO announcements
             (ids_id, asx_code, date, time, headline, pdf_url, file_size,
@@ -179,7 +181,7 @@ def upsert_announcement(conn: sqlite3.Connection, ann: Announcement) -> bool:
             ann.price_sensitive,
         ),
     )
-    inserted = conn.total_changes > 0
+    inserted = cur.rowcount > 0
     conn.commit()
     return inserted
 
@@ -585,13 +587,14 @@ def download_pdf(
                 for chunk in resp.iter_content(chunk_size=1 << 16):
                     if first_chunk and not chunk[:4].startswith(b"%PDF"):
                         log.warning("Response for ids_id=%s does not look like a PDF", ids_id)
+                        fh.close()
+                        dest_path.unlink(missing_ok=True)
                         return None
                     first_chunk = False
                     fh.write(chunk)
     except requests.RequestException as exc:
         log.warning("PDF download failed for ids_id=%s: %s", ids_id, exc)
-        if dest_path.exists():
-            dest_path.unlink()
+        dest_path.unlink(missing_ok=True)
         return None
 
     log.debug("Saved %s (%d bytes)", dest_path, dest_path.stat().st_size)
