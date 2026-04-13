@@ -1,0 +1,183 @@
+<html><head><link rel="stylesheet" href="/asx/v2/markets/css/normalize.css"><link rel="stylesheet" href="/asx/v2/markets/css/layout.css"><link rel="stylesheet" href="/asx/v2/markets/css/semantics.css"><link rel="stylesheet" href="/asx/v2/markets/css/flex.css"><link rel="stylesheet" href="/asx/v2/markets/fonts/fonts.css"><link rel="stylesheet" href="/asx/v2/markets/css/media-queries.css"><link rel="stylesheet" href="/asx/v2/markets/css/search-announcement.css"><script language="JavaScript">
+
+
+        function jspOnLoad() {
+            searchTypeChanged();
+        }
+
+        function searchTypeChanged(form) {
+            var timeframe = form['timeframe'];
+            if (timeframe != null) {
+                if (timeframe[0].checked == true) {
+                    form['period'].disabled = false;
+                    form['year'].disabled = true;
+                    form['dateReleased'].disabled = true;
+                } else if (timeframe[1].checked == true) {
+                    form['period'].disabled = true;
+                    form['year'].disabled = false;
+                    form['dateReleased'].disabled = true;
+                } else if (timeframe[2].checked == true) {
+                    form['period'].disabled = true;
+                    form['year'].disabled = true;
+                    form['dateReleased'].disabled = false;
+                }
+            }
+        }
+
+        function dateChanged(form) {
+            var dateReleased = form['dateReleased'];
+            var inputDateAsString = isValidDate(dateReleased);
+            if (!(inputDateAsString == "")) {
+                document.getElementById("dateReleased").value = inputDateAsString;
+            } else {
+                alert('Invalid date');
+            }
+        }
+
+        function isValidDate(dateValue) {
+            var dateAsString;
+            var comp = dateValue.value.split('/');
+            var d = parseInt(comp[0], 10);
+            var m = parseInt(comp[1], 10);
+            var y = parseInt(comp[2], 10);
+            var date = new Date(y, m - 1, d);
+            if (date.getFullYear() == y && date.getMonth() + 1 == m && date.getDate() == d) {
+                dateAsString = ('0' + date.getDate()).slice(-2) + '/'
+                    + ('0' + (date.getMonth() + 1)).slice(-2) + '/'
+                    + date.getFullYear();
+                return dateAsString;
+            } else {
+                return "";
+            }
+        }
+
+    </script></head><body class="layout-two-column section-dynamic  page-3318 wide">
+<section class="wrapper">
+    <article>
+        <div class="page" id="content">
+            <div class="primary">
+                <h2>Search for recent and past announcements</h2>
+                <p><a href="https://www.asx.com.au/prices/about-announcements.htm" target="_blank">Important information about market announcements</a></p>
+                <p>ASX Announcement searches use the first 3 characters of the ticker code only.</p>
+                
+                    <p class="error">
+
+                        
+                            <span class="">The ASX code you entered does not match any companies code. Please enter a new code and try again.</span>
+                            <br>
+                        
+                        
+
+                    </p>
+                
+
+                <div>
+                    <form id="announcements" name="searchAnnouncementsForm" commandname="announcementSearch" action="/asx/v2/statistics/announcements.do;jsessionid=FB93E99798CA8FE9C6A4D5FD6907F740?by=asxCode&amp;asxCode=ZZZZZ&amp;timeframe=D&amp;period=P" method="get">
+
+
+                        <div id="announcements-search">
+
+
+                            
+
+                            <table cellspacing="0" class="contenttable">
+                                    
+                                
+                                <input type="hidden" name="by" value="asxCode">
+
+                                <tr>
+                                    <th colspan="2" class="row">
+                                        <label class="search">Search by ASX Code</label>
+                                        <input id="issuerCode" name="asxCode" type="text" value="ZZZZZ" size="8" maxlength="3">
+                                    </th>
+                                    
+
+
+                                </tr><tr>
+                                    <td align="right" width="90"><label for="timeframeType1">Time frame</label></td>
+                                    <td nowrap="nowrap" valign="top">
+                                        <span class="released">Released during</span>
+                                        <input type="radio" name="timeframe" value="D" checked onclick="searchTypeChanged(this.form);" id="timeframeType1">
+                                        <select name="period">
+                                            <option value="T">Today</option>
+                                            <option value="P">Previous Trading Day</option>
+                                            <option value="W" selected="selected">The past week</option>
+                                            <option value="M">The past month</option>
+                                            <option value="M3">The past 3 months</option>
+                                            <option value="M6">The past 6 months</option>
+                                        </select>
+                                    </td>
+                                </tr>
+
+                                <tr class="or">
+                                    <td align="right" nowrap="nowrap"><label for="timeframeType2">OR</label></td>
+                                    <td>
+                                        <span class="released">Released during</span>
+                                        <input type="radio" name="timeframe" value="Y" onclick="searchTypeChanged(this.form);" id="timeframeType2">
+                                        <select id="year" name="year" disabled="disabled"><option value="2026">2026</option><option value="2025">2025</option><option value="2024">2024</option><option value="2023">2023</option><option value="2022">2022</option><option value="2021">2021</option><option value="2020">2020</option><option value="2019">2019</option><option value="2018">2018</option><option value="2017">2017</option><option value="2016">2016</option><option value="2015">2015</option><option value="2014">2014</option><option value="2013">2013</option><option value="2012">2012</option><option value="2011">2011</option><option value="2010">2010</option><option value="2009">2009</option><option value="2008">2008</option><option value="2007">2007</option><option value="2006">2006</option><option value="2005">2005</option><option value="2004">2004</option><option value="2003">2003</option><option value="2002">2002</option><option value="2001">2001</option><option value="2000">2000</option><option value="1999">1999</option><option value="1998">1998</option></select>
+                                        <span class="red">*</span>
+                                    </td>
+                                </tr>
+
+                                <tr class="or">
+                                    <td align="right" nowrap="nowrap"><label for="timeframeType3">OR</label></td>
+                                    <td>
+                                        <span class="released">Released on this date</span>
+                                        <input type="radio" name="timeframe" value="R" onclick="searchTypeChanged(this.form);" id="timeframeType3">
+                                        <input id="dateReleased" name="dateReleased" class="datepickers" onchange="dateChanged(this.form);" type="text" value="" size="12" maxlength="10">
+                                        <br>
+                                        <label class="delisted">Search delisted,
+                                            <a href="https://www.asx.com.au/markets/market-resources/asx-codes-and-descriptors/asx-code-changes" target="_blank">code or name changes</a>
+                                            <input type="checkbox" name="delisted"> </label>
+                                        
+
+                                    </td>
+                            </tr></table>
+                            <div class="search-submit">
+                                <input type="submit" value="Search" class="actionbutton">
+                            </div>
+                        </div>
+                    </form>
+
+                    <script language="JavaScript" type="text/javascript">
+
+                        var focusControl = document.forms["searchAnnouncementsForm"].elements["asxCode"];
+                        if (typeof focusControl != 'undefined') {
+                            if (focusControl.type != "hidden") {
+                                focusControl.focus();
+                            }
+                        }
+
+
+                        // invoke when page is rendered to correctly enable radio group.
+                        searchTypeChanged(document.forms["searchAnnouncementsForm"]);
+
+                    </script>
+                </div>
+
+                <div>
+                    <form id="announcement-price-search" name="searchAnnouncementsForm2" commandname="announcementSearch" action="/asx/v2/statistics/announcements.do;jsessionid=FB93E99798CA8FE9C6A4D5FD6907F740?by=asxCode&amp;asxCode=ZZZZZ&amp;timeframe=D&amp;period=P" method="get">
+                        <input type="hidden" name="by" value="companyName">
+                        <table cellspacing="0" class="contenttable">
+                            <tr>
+                                <th class="row">
+                                    Don't know the ASX Code?
+                                </th>
+                            </tr>
+                            <tr>
+                                <td nowrap align="right" valign="top">
+                                    Enter the start of the company name<br>
+                                    <input id="companyName" name="companyName" type="text" value="" size="20" maxlength="60">
+                                    <input type="submit" value="Go" class="actionbutton">
+                                </td>
+                            </tr>
+                        </table>
+                    </form>
+                </div>
+                <p><strong>Viewing Market Announcements:</strong><br>
+                 Users of Adobe Acrobat Reader version 6.0.0 may have difficulty accessing PDF announcements. Symptoms include slow downloads, blank documents, and small white boxes appearing in the PDF. We recommend you download the latest version of the free <a href="http://www.adobe.com/products/acrobat/readstep2.html" title="Download Adobe Acrobat Reader" target="_blank">Adobe Acrobat Reader</a>. To check which version you have, open Adobe Acrobat Reader, click on 'Help', then click 'About Adobe Reader 6.0'.</p>
+            </div>
+        </div>
+    </article>
+</section>
+</body></html>
