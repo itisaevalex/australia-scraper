@@ -92,7 +92,7 @@ class CrawlResult:
     announcements_new: int
     started_at: str
     completed_at: str
-    errors: list[str] = field(default_factory=list)
+    errors: tuple[str, ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------------------

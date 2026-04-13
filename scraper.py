@@ -74,7 +74,7 @@ FETCH_DELAY = 0.05  # seconds between page fetches (no rate limiting detected)
 
 # Historical backfill range supported by ASX API
 YEAR_RANGE_MIN = 1998
-YEAR_RANGE_MAX = 2026
+YEAR_RANGE_MAX = datetime.now(timezone.utc).year
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -409,7 +409,7 @@ def crawl_ticker(
         announcements_new=new_count,
         started_at=started_at,
         completed_at=datetime.now(timezone.utc).isoformat(),
-        errors=errors,
+        errors=tuple(errors),
     )
 
 
@@ -438,7 +438,7 @@ def crawl_prev_bus_day(
             announcements_new=0,
             started_at=started_at,
             completed_at=datetime.now(timezone.utc).isoformat(),
-            errors=["HTTP request failed for prevBusDayAnns.do"],
+            errors=("HTTP request failed for prevBusDayAnns.do",),
         )
 
     announcements, errors = parse_prev_bus_day_anns(resp.text)
@@ -466,7 +466,7 @@ def crawl_prev_bus_day(
         announcements_new=new_count,
         started_at=started_at,
         completed_at=datetime.now(timezone.utc).isoformat(),
-        errors=errors,
+        errors=tuple(errors),
     )
 
 
@@ -635,7 +635,7 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
                     announcements_new=new_count,
                     started_at=started_at,
                     completed_at=datetime.now(timezone.utc).isoformat(),
-                    errors=errors,
+                    errors=tuple(errors),
                 )
                 log_crawl(conn, result)
                 all_results.append(result)
@@ -716,7 +716,9 @@ def _do_export(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
     if args.downloaded_only:
         query += " AND downloaded = TRUE"
 
-    query += " ORDER BY date DESC, time DESC"
+    # Dates stored as DD/MM/YYYY — reorder to YYYYMMDD for correct chronological sort
+    query += (" ORDER BY substr(date,7,4)||substr(date,4,2)||substr(date,1,2) DESC,"
+              " time DESC")
 
     cur = conn.execute(query, params)
     rows: list[dict] = [dict(row) for row in cur.fetchall()]
