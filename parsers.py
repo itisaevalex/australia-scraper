@@ -236,6 +236,11 @@ def parse_announcements_do(html: str) -> tuple[list[Filing], list[str]]:
                     file_size=hl["file_size"],
                     num_pages=hl["num_pages"],
                     price_sensitive=price_sens,
+                    # ISIN and LEI are not present in the ASX announcement HTML
+                    # response; they require a separate company-level lookup.
+                    isin=None,
+                    lei=None,
+                    language="en",
                 )
             )
         except Exception as exc:
@@ -302,6 +307,11 @@ def parse_prev_bus_day_anns(html: str) -> tuple[list[Filing], list[str]]:
                     file_size=hl["file_size"],
                     num_pages=hl["num_pages"],
                     price_sensitive=price_sens,
+                    # ISIN and LEI are not present in the ASX announcement HTML
+                    # response; they require a separate company-level lookup.
+                    isin=None,
+                    lei=None,
+                    language="en",
                 )
             )
         except Exception as exc:

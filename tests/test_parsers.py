@@ -420,6 +420,36 @@ class TestParseAnnouncementsDo:
             with pytest.raises((AttributeError, TypeError)):
                 f.headline = "mutated"  # type: ignore[misc]
 
+    def test_language_is_en_in_all_filings(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            assert f.language == "en"
+
+    def test_isin_is_none_in_all_filings(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            assert f.isin is None
+
+    def test_lei_is_none_in_all_filings(self, bhp_html):
+        filings, _ = parse_announcements_do(bhp_html)
+        for f in filings:
+            assert f.lei is None
+
+    def test_minimal_html_language_is_en(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        for f in filings:
+            assert f.language == "en"
+
+    def test_minimal_html_isin_is_none(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        for f in filings:
+            assert f.isin is None
+
+    def test_minimal_html_lei_is_none(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html)
+        for f in filings:
+            assert f.lei is None
+
 
 # ---------------------------------------------------------------------------
 # parse_prev_bus_day_anns() — all-company daily page parser
@@ -560,6 +590,36 @@ class TestParsePrevBusDayAnns:
         filings, _ = parse_prev_bus_day_anns(prevbusday_html)
         for f in filings:
             assert f.country == "AU"
+
+    def test_language_is_en_in_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        for f in filings:
+            assert f.language == "en"
+
+    def test_isin_is_none_in_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        for f in filings:
+            assert f.isin is None
+
+    def test_lei_is_none_in_real_html(self, prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(prevbusday_html)
+        for f in filings:
+            assert f.lei is None
+
+    def test_minimal_html_language_is_en(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        for f in filings:
+            assert f.language == "en"
+
+    def test_minimal_html_isin_is_none(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        for f in filings:
+            assert f.isin is None
+
+    def test_minimal_html_lei_is_none(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
+        for f in filings:
+            assert f.lei is None
 
 
 # ---------------------------------------------------------------------------

@@ -28,12 +28,15 @@ CREATE TABLE IF NOT EXISTS filings (
     country               TEXT NOT NULL DEFAULT 'AU',
     ticker                TEXT NOT NULL,
     company_name          TEXT,
+    isin                  TEXT,
+    lei                   TEXT,
     filing_date           TEXT NOT NULL,
     filing_time           TEXT,
     headline              TEXT NOT NULL,
     filing_type           TEXT,
     category              TEXT,
     subcategory           TEXT,
+    language              TEXT DEFAULT 'en',
     document_url          TEXT,
     direct_download_url   TEXT,
     file_size             TEXT,
@@ -44,6 +47,8 @@ CREATE TABLE IF NOT EXISTS filings (
     raw_metadata          TEXT,
     created_at            TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_filings_isin ON filings(isin);
 
 CREATE TABLE IF NOT EXISTS crawl_log (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +88,9 @@ MIGRATIONS: list[tuple[str, str]] = [
     ("company_name",  "ALTER TABLE filings ADD COLUMN company_name TEXT"),
     ("category",      "ALTER TABLE filings ADD COLUMN category TEXT"),
     ("subcategory",   "ALTER TABLE filings ADD COLUMN subcategory TEXT"),
+    ("isin",          "ALTER TABLE filings ADD COLUMN isin TEXT"),
+    ("lei",           "ALTER TABLE filings ADD COLUMN lei TEXT"),
+    ("language",      "ALTER TABLE filings ADD COLUMN language TEXT DEFAULT 'en'"),
     # Legacy column that may exist on very old installs (from original MIGRATIONS list)
     ("announcement_type",
      "ALTER TABLE announcements ADD COLUMN announcement_type TEXT"),
@@ -115,6 +123,9 @@ class Filing:
     file_size: str | None
     num_pages: int | None
     price_sensitive: bool
+    isin: str | None = None
+    lei: str | None = None
+    language: str = "en"
 
 
 # Keep backwards-compatible alias so callers that import Announcement still work
@@ -164,10 +175,14 @@ def get_db(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
 
     _ensure_filings_table(conn)
+    # Migrations must run before SCHEMA_SQL on pre-L3 DBs so that the
+    # CREATE INDEX IF NOT EXISTS statement sees already-added columns (e.g. isin).
+    # On fresh databases the filings table doesn't exist yet so migrations
+    # are no-ops, then SCHEMA_SQL creates it correctly.
+    _apply_migrations(conn)
     conn.executescript(SCHEMA_SQL)
     conn.commit()
 
-    _apply_migrations(conn)
     return conn
 
 
@@ -259,6 +274,17 @@ def _migrate_crawl_log(conn: sqlite3.Connection) -> None:
     Args:
         conn: Active SQLite connection.
     """
+    # If crawl_log doesn't exist yet, SCHEMA_SQL will create it with the correct
+    # column names — no migration needed.
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "crawl_log" not in tables:
+        return
+
     existing_crawl_cols = {
         row[1].lower()
         for row in conn.execute("PRAGMA table_info(crawl_log)").fetchall()
@@ -343,8 +369,8 @@ def upsert_filing(conn: sqlite3.Connection, filing: Filing) -> bool:
         INSERT OR IGNORE INTO filings
             (filing_id, source, country, ticker, filing_date, filing_time,
              headline, filing_type, document_url, file_size, num_pages,
-             price_sensitive)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             price_sensitive, isin, lei, language)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             filing.filing_id,
@@ -359,6 +385,9 @@ def upsert_filing(conn: sqlite3.Connection, filing: Filing) -> bool:
             filing.file_size,
             filing.num_pages,
             filing.price_sensitive,
+            filing.isin,
+            filing.lei,
+            filing.language,
         ),
     )
     inserted = cur.rowcount > 0

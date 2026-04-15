@@ -195,6 +195,9 @@ def sample_filing():
         file_size="120.0KB",
         num_pages=42,
         price_sensitive=False,
+        isin=None,
+        lei=None,
+        language="en",
     )
 
 

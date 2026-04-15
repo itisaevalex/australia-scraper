@@ -47,6 +47,9 @@ def _filing(
     filing_type: str = "other",
     source: str = "asx",
     country: str = "AU",
+    isin: str | None = None,
+    lei: str | None = None,
+    language: str = "en",
 ) -> Filing:
     return Filing(
         filing_id=filing_id,
@@ -61,6 +64,9 @@ def _filing(
         file_size=None,
         num_pages=None,
         price_sensitive=price_sensitive,
+        isin=isin,
+        lei=lei,
+        language=language,
     )
 
 
@@ -90,13 +96,48 @@ class TestGetDb:
         ).fetchall()}
         expected = {
             "filing_id", "source", "country", "ticker",
-            "company_name", "filing_date", "filing_time", "headline",
+            "company_name", "isin", "lei", "language",
+            "filing_date", "filing_time", "headline",
             "filing_type", "category", "subcategory",
             "document_url", "direct_download_url", "file_size",
             "num_pages", "price_sensitive", "downloaded", "download_path",
             "raw_metadata", "created_at",
         }
         assert expected.issubset(cols)
+
+    def test_isin_column_present(self, mem_db):
+        cols = {row[1] for row in mem_db.execute(
+            "PRAGMA table_info(filings)"
+        ).fetchall()}
+        assert "isin" in cols
+
+    def test_lei_column_present(self, mem_db):
+        cols = {row[1] for row in mem_db.execute(
+            "PRAGMA table_info(filings)"
+        ).fetchall()}
+        assert "lei" in cols
+
+    def test_language_column_present(self, mem_db):
+        cols = {row[1] for row in mem_db.execute(
+            "PRAGMA table_info(filings)"
+        ).fetchall()}
+        assert "language" in cols
+
+    def test_language_column_defaults_to_en(self, mem_db):
+        col_info = {
+            row[1]: row[4]
+            for row in mem_db.execute("PRAGMA table_info(filings)").fetchall()
+        }
+        assert col_info.get("language") == "'en'"
+
+    def test_isin_index_created(self, mem_db):
+        indexes = {
+            row[1]
+            for row in mem_db.execute(
+                "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='filings'"
+            ).fetchall()
+        }
+        assert "idx_filings_isin" in indexes
 
     def test_crawl_log_has_expected_columns(self, mem_db):
         cols = {row[1] for row in mem_db.execute(
@@ -326,6 +367,54 @@ class TestUpsertFiling:
         f = _filing("ALIAS001")
         result = upsert_announcement(mem_db, f)
         assert result is True
+
+    def test_isin_stored_when_provided(self, mem_db):
+        f = _filing("ISIN0001", isin="AU000000BHP4")
+        upsert_filing(mem_db, f)
+        row = dict(mem_db.execute(
+            "SELECT isin FROM filings WHERE filing_id = ?", (f.filing_id,)
+        ).fetchone())
+        assert row["isin"] == "AU000000BHP4"
+
+    def test_isin_null_when_not_provided(self, mem_db):
+        f = _filing("ISIN0002", isin=None)
+        upsert_filing(mem_db, f)
+        row = dict(mem_db.execute(
+            "SELECT isin FROM filings WHERE filing_id = ?", (f.filing_id,)
+        ).fetchone())
+        assert row["isin"] is None
+
+    def test_lei_stored_when_provided(self, mem_db):
+        f = _filing("LEI00001", lei="213800WMIIZCLEII2L19")
+        upsert_filing(mem_db, f)
+        row = dict(mem_db.execute(
+            "SELECT lei FROM filings WHERE filing_id = ?", (f.filing_id,)
+        ).fetchone())
+        assert row["lei"] == "213800WMIIZCLEII2L19"
+
+    def test_lei_null_when_not_provided(self, mem_db):
+        f = _filing("LEI00002", lei=None)
+        upsert_filing(mem_db, f)
+        row = dict(mem_db.execute(
+            "SELECT lei FROM filings WHERE filing_id = ?", (f.filing_id,)
+        ).fetchone())
+        assert row["lei"] is None
+
+    def test_language_defaults_to_en(self, mem_db):
+        f = _filing("LANG0001")
+        upsert_filing(mem_db, f)
+        row = dict(mem_db.execute(
+            "SELECT language FROM filings WHERE filing_id = ?", (f.filing_id,)
+        ).fetchone())
+        assert row["language"] == "en"
+
+    def test_language_stored_when_provided(self, mem_db):
+        f = _filing("LANG0002", language="zh")
+        upsert_filing(mem_db, f)
+        row = dict(mem_db.execute(
+            "SELECT language FROM filings WHERE filing_id = ?", (f.filing_id,)
+        ).fetchone())
+        assert row["language"] == "zh"
 
 
 # ---------------------------------------------------------------------------
@@ -630,3 +719,23 @@ class TestFilingDataclass:
     def test_filing_date_is_iso_format(self, sample_filing):
         import re
         assert re.match(r"^\d{4}-\d{2}-\d{2}$", sample_filing.filing_date)
+
+    def test_filing_has_isin_field_defaulting_to_none(self):
+        f = _filing("ISIN_DC01")
+        assert f.isin is None
+
+    def test_filing_has_lei_field_defaulting_to_none(self):
+        f = _filing("LEI_DC01")
+        assert f.lei is None
+
+    def test_filing_has_language_field_defaulting_to_en(self):
+        f = _filing("LANG_DC01")
+        assert f.language == "en"
+
+    def test_filing_isin_accepts_valid_au_isin(self):
+        f = _filing("ISIN_DC02", isin="AU000000BHP4")
+        assert f.isin == "AU000000BHP4"
+
+    def test_filing_lei_accepts_valid_lei(self):
+        f = _filing("LEI_DC02", lei="213800WMIIZCLEII2L19")
+        assert f.lei == "213800WMIIZCLEII2L19"
