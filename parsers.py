@@ -170,14 +170,21 @@ def _parse_headline_td(td: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def parse_announcements_do(html: str) -> tuple[list[Filing], list[str]]:
+def parse_announcements_do(
+    html: str,
+    isin_map: dict[str, str] | None = None,
+) -> tuple[list[Filing], list[str]]:
     """Parse /asx/v2/statistics/announcements.do HTML.
 
     Column order: Date/Time | Price sens. | Headline
     ASX code comes from the page <h2> header.
 
     Args:
-        html: Raw HTML response body.
+        html:     Raw HTML response body.
+        isin_map: Optional ``{ticker: isin}`` mapping built from the ASX
+                  ISIN.xls bulk file.  When provided, each Filing's ``isin``
+                  field is populated at parse time.  Defaults to ``None``
+                  for backward compatibility (isin stays ``None``).
 
     Returns:
         A tuple of (filings, error_strings).
@@ -221,13 +228,17 @@ def parse_announcements_do(html: str) -> tuple[list[Filing], list[str]]:
                 continue
 
             filing_type = classify_filing_type(hl["headline"])
+            ticker_val = asx_code or ""
+            resolved_isin = (
+                isin_map.get(ticker_val.upper()) if isin_map and ticker_val else None
+            )
 
             filings.append(
                 Filing(
                     filing_id=hl["ids_id"],
                     source="asx",
                     country="AU",
-                    ticker=asx_code or "",
+                    ticker=ticker_val,
                     filing_date=_normalize_date(date_raw),
                     filing_time=time_val,
                     headline=hl["headline"],
@@ -236,9 +247,7 @@ def parse_announcements_do(html: str) -> tuple[list[Filing], list[str]]:
                     file_size=hl["file_size"],
                     num_pages=hl["num_pages"],
                     price_sensitive=price_sens,
-                    # ISIN and LEI are not present in the ASX announcement HTML
-                    # response; they require a separate company-level lookup.
-                    isin=None,
+                    isin=resolved_isin,
                     lei=None,
                     language="en",
                 )
@@ -249,13 +258,20 @@ def parse_announcements_do(html: str) -> tuple[list[Filing], list[str]]:
     return filings, errors
 
 
-def parse_prev_bus_day_anns(html: str) -> tuple[list[Filing], list[str]]:
+def parse_prev_bus_day_anns(
+    html: str,
+    isin_map: dict[str, str] | None = None,
+) -> tuple[list[Filing], list[str]]:
     """Parse /asx/v2/statistics/prevBusDayAnns.do HTML.
 
     Column order: ASX Code | Date/Time | Price sens. | Headline
 
     Args:
-        html: Raw HTML response body.
+        html:     Raw HTML response body.
+        isin_map: Optional ``{ticker: isin}`` mapping built from the ASX
+                  ISIN.xls bulk file.  When provided, each Filing's ``isin``
+                  field is populated at parse time.  Defaults to ``None``
+                  for backward compatibility (isin stays ``None``).
 
     Returns:
         A tuple of (filings, error_strings).
@@ -292,6 +308,9 @@ def parse_prev_bus_day_anns(html: str) -> tuple[list[Filing], list[str]]:
                 continue
 
             filing_type = classify_filing_type(hl["headline"])
+            resolved_isin = (
+                isin_map.get(asx_code.upper()) if isin_map and asx_code else None
+            )
 
             filings.append(
                 Filing(
@@ -307,9 +326,7 @@ def parse_prev_bus_day_anns(html: str) -> tuple[list[Filing], list[str]]:
                     file_size=hl["file_size"],
                     num_pages=hl["num_pages"],
                     price_sensitive=price_sens,
-                    # ISIN and LEI are not present in the ASX announcement HTML
-                    # response; they require a separate company-level lookup.
-                    isin=None,
+                    isin=resolved_isin,
                     lei=None,
                     language="en",
                 )

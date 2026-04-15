@@ -55,6 +55,7 @@ from db import (
 )
 from downloader import batch_download
 from http_utils import make_session, safe_get
+from isin_lookup import load_isin_map
 from parsers import parse_announcements_do, parse_prev_bus_day_anns
 
 # ---------------------------------------------------------------------------
@@ -314,17 +315,21 @@ def _should_skip_incremental(
 # ---------------------------------------------------------------------------
 
 
-def _crawl_ticker_http(ticker: str, period: str | None, year: int | None) -> tuple[
-    list[Filing], list[str], str, str, str
-]:
+def _crawl_ticker_http(
+    ticker: str,
+    period: str | None,
+    year: int | None,
+    isin_map: dict[str, str] | None = None,
+) -> tuple[list[Filing], list[str], str, str, str]:
     """Perform HTTP fetch + parse for a single ticker. No DB writes.
 
     Creates its own Session so it is safe to call from a worker thread.
 
     Args:
-        ticker: ASX ticker code.
-        period: Period string or None.
-        year:   Calendar year or None.
+        ticker:   ASX ticker code.
+        period:   Period string or None.
+        year:     Calendar year or None.
+        isin_map: Optional ``{ticker: isin}`` mapping to populate ISIN fields.
 
     Returns:
         Tuple of (filings, errors, ticker, period_label, started_at).
@@ -361,7 +366,7 @@ def _crawl_ticker_http(ticker: str, period: str | None, year: int | None) -> tup
             started_at,
         )
 
-    filings, errors = parse_announcements_do(resp.text)
+    filings, errors = parse_announcements_do(resp.text, isin_map=isin_map)
     return filings, errors, ticker, period_label, started_at
 
 
@@ -371,23 +376,25 @@ def crawl_ticker(
     ticker: str,
     period: str | None = None,
     year: int | None = None,
+    isin_map: dict[str, str] | None = None,
 ) -> CrawlResult:
     """Crawl filings for a single ASX ticker. Returns a CrawlResult.
 
     This is the sequential path — it owns both HTTP and DB writes.
 
     Args:
-        session: Shared requests.Session (sequential use only).
-        conn:    Main-thread SQLite connection.
-        ticker:  ASX ticker code.
-        period:  Time period string.
-        year:    Calendar year (overrides period).
+        session:  Shared requests.Session (sequential use only).
+        conn:     Main-thread SQLite connection.
+        ticker:   ASX ticker code.
+        period:   Time period string.
+        year:     Calendar year (overrides period).
+        isin_map: Optional ``{ticker: isin}`` mapping to populate ISIN fields.
 
     Returns:
         A CrawlResult summarising the outcome.
     """
     filings, errors, _, period_label, started_at = _crawl_ticker_http(
-        ticker, period, year
+        ticker, period, year, isin_map=isin_map
     )
 
     new_count = 0
@@ -419,13 +426,16 @@ def crawl_ticker(
 
 
 def crawl_prev_bus_day(
-    session: requests.Session, conn: sqlite3.Connection
+    session: requests.Session,
+    conn: sqlite3.Connection,
+    isin_map: dict[str, str] | None = None,
 ) -> CrawlResult:
     """Crawl all companies' previous business day filings in one request.
 
     Args:
-        session: Active requests.Session.
-        conn:    Main-thread SQLite connection.
+        session:  Active requests.Session.
+        conn:     Main-thread SQLite connection.
+        isin_map: Optional ``{ticker: isin}`` mapping to populate ISIN fields.
 
     Returns:
         A CrawlResult summarising the outcome.
@@ -446,7 +456,7 @@ def crawl_prev_bus_day(
             errors=("HTTP request failed for prevBusDayAnns.do",),
         )
 
-    filings, errors = parse_prev_bus_day_anns(resp.text)
+    filings, errors = parse_prev_bus_day_anns(resp.text, isin_map=isin_map)
 
     new_count = 0
     for filing in filings:
@@ -485,6 +495,7 @@ def _crawl_tickers_parallel(
     period: str | None,
     year: int | None,
     crawl_workers: int,
+    isin_map: dict[str, str] | None = None,
 ) -> list[tuple[list[Filing], list[str], str, str, str]]:
     """Crawl multiple tickers in parallel using ThreadPoolExecutor.
 
@@ -496,6 +507,7 @@ def _crawl_tickers_parallel(
         period:        Period label or None.
         year:          Calendar year or None.
         crawl_workers: Number of parallel HTTP threads.
+        isin_map:      Optional ``{ticker: isin}`` mapping to populate ISIN fields.
 
     Returns:
         List of (filings, errors, ticker, period_label, started_at) tuples.
@@ -503,7 +515,7 @@ def _crawl_tickers_parallel(
     results: list[tuple[list[Filing], list[str], str, str, str]] = []
     with ThreadPoolExecutor(max_workers=crawl_workers) as executor:
         futures = {
-            executor.submit(_crawl_ticker_http, t, period, year): t
+            executor.submit(_crawl_ticker_http, t, period, year, isin_map): t
             for t in tickers
         }
         for future in as_completed(futures):
@@ -547,9 +559,17 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     session = make_session()
     all_errors: list[str] = []
 
+    # --- Load ISIN lookup table once at startup ---
+    log.info("Loading ASX ISIN table...")
+    isin_map = load_isin_map(session)
+    if isin_map:
+        log.info("ISIN table loaded: %d entries", len(isin_map))
+    else:
+        log.warning("ISIN table unavailable — filings will be stored with isin=None")
+
     # --- prevBusDayAnns fast path ---
     if args.all_day:
-        result = crawl_prev_bus_day(session, conn)
+        result = crawl_prev_bus_day(session, conn, isin_map=isin_map)
         log_crawl(conn, result)
         _print_crawl_summary([result])
         if args.download:
@@ -631,7 +651,11 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
 
         if crawl_workers > 1:
             raw_results = _crawl_tickers_parallel(
-                effective_tickers, args.period if year is None else None, year, crawl_workers
+                effective_tickers,
+                args.period if year is None else None,
+                year,
+                crawl_workers,
+                isin_map=isin_map,
             )
             for filings, errors, ticker, p_label, started_at in raw_results:
                 new_count = 0
@@ -662,6 +686,7 @@ def _do_crawl(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
                     ticker,
                     period=args.period if year is None else None,
                     year=year,
+                    isin_map=isin_map,
                 )
                 log_crawl(conn, result)
                 all_results.append(result)
@@ -698,10 +723,15 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         log.info(
             "Monitoring started. Interval: %ds. Press Ctrl+C to stop.", args.interval
         )
+        isin_map = load_isin_map(session)
+        if isin_map:
+            log.info("ISIN table loaded: %d entries", len(isin_map))
+        else:
+            log.warning("ISIN table unavailable — filings will be stored with isin=None")
 
         while True:
             log.info("--- Monitor tick at %s ---", datetime.now(timezone.utc).isoformat())
-            result = crawl_prev_bus_day(session, conn)
+            result = crawl_prev_bus_day(session, conn, isin_map=isin_map)
             log_crawl(conn, result)
 
             if args.download and result.filings_new > 0:

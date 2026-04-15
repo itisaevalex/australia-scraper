@@ -450,6 +450,23 @@ class TestParseAnnouncementsDo:
         for f in filings:
             assert f.lei is None
 
+    # ---- isin_map parameter tests ----------------------------------------
+
+    def test_isin_populated_when_isin_map_provided(self, minimal_announcements_html):
+        # ACM ticker is embedded in minimal_announcements_html
+        isin_map = {"ACM": "AU000000ACM1"}
+        filings, _ = parse_announcements_do(minimal_announcements_html, isin_map=isin_map)
+        assert all(f.isin == "AU000000ACM1" for f in filings)
+
+    def test_isin_none_when_ticker_absent_from_map(self, minimal_announcements_html):
+        isin_map = {"BHP": "AU000000BHP4"}  # ACM not in map
+        filings, _ = parse_announcements_do(minimal_announcements_html, isin_map=isin_map)
+        assert all(f.isin is None for f in filings)
+
+    def test_isin_none_when_empty_map_provided(self, minimal_announcements_html):
+        filings, _ = parse_announcements_do(minimal_announcements_html, isin_map={})
+        assert all(f.isin is None for f in filings)
+
 
 # ---------------------------------------------------------------------------
 # parse_prev_bus_day_anns() — all-company daily page parser
@@ -620,6 +637,27 @@ class TestParsePrevBusDayAnns:
         filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html)
         for f in filings:
             assert f.lei is None
+
+    # ---- isin_map parameter tests ----------------------------------------
+
+    def test_isin_populated_for_matching_ticker(self, minimal_prevbusday_html):
+        # minimal_prevbusday_html has BHP and CBA
+        isin_map = {"BHP": "AU000000BHP4", "CBA": "AU000000CBA7"}
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html, isin_map=isin_map)
+        bhp = next(f for f in filings if f.ticker == "BHP")
+        cba = next(f for f in filings if f.ticker == "CBA")
+        assert bhp.isin == "AU000000BHP4"
+        assert cba.isin == "AU000000CBA7"
+
+    def test_isin_none_when_ticker_absent_from_map(self, minimal_prevbusday_html):
+        isin_map = {"BHP": "AU000000BHP4"}  # CBA not in map
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html, isin_map=isin_map)
+        cba = next(f for f in filings if f.ticker == "CBA")
+        assert cba.isin is None
+
+    def test_isin_none_when_empty_map_provided(self, minimal_prevbusday_html):
+        filings, _ = parse_prev_bus_day_anns(minimal_prevbusday_html, isin_map={})
+        assert all(f.isin is None for f in filings)
 
 
 # ---------------------------------------------------------------------------
