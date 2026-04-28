@@ -27,3 +27,5 @@ Thumbs.db
 # Environment
 .env
 .env.local
+.coverage
+htmlcov/
